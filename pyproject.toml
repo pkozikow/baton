@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling==1.32.4"]
+build-backend = "hatchling.build"
+
+[project]
+name = "baton"
+version = "0.1.0"
+description = "Multi-repository project worktrees, agent coordination, and review workflows"
+readme = "README.md"
+requires-python = ">=3.13"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Piotr Kozikowski" }]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/pkozikow/baton"
+Repository = "https://github.com/pkozikow/baton"
+Issues = "https://github.com/pkozikow/baton/issues"
+
+[dependency-groups]
+dev = ["hatchling==1.32.4"]
+
+[project.scripts]
+baton = "baton.cli:main"
+baton-retro-cron = "baton.retro_cron:main"
+
+[tool.hatch.build.hooks.custom]
+path = "hatch_build.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["baton"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"blackboard.py" = "blackboard.py"
+"agent-skills/review-runner-lib.sh" = "baton/skills/review-runner-lib.sh"
+"agent-skills/baton-plan" = "baton/skills/baton-plan"
+"agent-skills/baton-plan-review-executor" = "baton/skills/baton-plan-review-executor"
+"agent-skills/baton-peer-review" = "baton/skills/baton-peer-review"
+"agent-skills/baton-peer-review-executor" = "baton/skills/baton-peer-review-executor"
+"agent-skills/baton-review-loop" = "baton/skills/baton-review-loop"
+"agent-skills/baton-retro" = "baton/skills/baton-retro"
+
+"agent-skills/baton-workflow" = "baton/skills/baton-workflow"
+
+[tool.hatch.build.targets.sdist]
+include = ["baton", "blackboard.py", "agent-skills", "bin", "tests", "run_tests.py", "check_ci_reports.py", "install.sh", "README.md", "AGENTS.md", "CHANGELOG.md", "LICENSE", "docs", "pyproject.toml", "hatch_build.py", "uv.lock"]
+exclude = ["agent-skills/tests", "**/__pycache__", "experiments"]

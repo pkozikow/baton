@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd)"
+exec python3 -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); from baton.cli import main; raise SystemExit(main())' "$script_dir/.." "$@"

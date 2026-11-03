@@ -1,0 +1,6 @@
+interface:
+  display_name: "Project Retrospective"
+  short_description: "Analyze project lessons and archive relevant notes"
+  default_prompt: "Use $baton-retro to write the current project's retrospective."
+policy:
+  allow_implicit_invocation: false

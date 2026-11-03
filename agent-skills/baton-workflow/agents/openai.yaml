@@ -1,0 +1,5 @@
+interface:
+  display_name: "Baton Workflow"
+  short_description: "Find Baton projects from anywhere; coordinate work"
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,7 @@
+interface:
+  display_name: "Baton Review Loop"
+  short_description: "Run configured focused and general reviews"
+  default_prompt: "Use $baton-review-loop to run the configured focused reviews and general review rounds."
+
+policy:
+  allow_implicit_invocation: false
