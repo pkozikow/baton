@@ -145,6 +145,29 @@ class DoctorTest(unittest.TestCase):
         self.assertEqual(next(row for row in data["checks"] if row["name"] == "config")["status"], "fail")
         self.assertFalse(data["complete"])
 
+    def test_text_output_includes_redacted_smoke_failure_details(self) -> None:
+        binary = self.root / "cursor-agent"
+        binary.write_text("#!/bin/sh\nprintf 'Workspace Trust Required\\nPass --trust; token=private-secret\\n' >&2\nexit 1\n")
+        binary.chmod(0o755)
+        self.env["CURSOR_BIN"] = str(binary)
+        Path(self.env["BATON_CONFIG_FILE"]).write_text(json.dumps({
+            "plan_review_model": {"cursor": "smoke-model"},
+            "implementation_review_model": {"cursor": "smoke-model"},
+        }))
+        command = ["bash", str(fixtures.SCRIPT), "doctor"]
+        result = subprocess.run(command, env=self.env, cwd=self.root, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("FAIL model:cursor:smoke-model: cursor smoke test failed", result.stdout)
+        self.assertIn("     Workspace Trust Required\n     Pass --trust; token=[redacted]\n", result.stdout)
+        self.assertNotIn("private-secret", result.stdout)
+        self.assertNotIn("{'source':", result.stdout)
+        structured = subprocess.run([*command, "--json"], env=self.env, cwd=self.root,
+                                    text=True, capture_output=True)
+        self.assertEqual(structured.returncode, 1, structured.stderr)
+        data = json.loads(structured.stdout)
+        check = next(row for row in data["checks"] if row["name"] == "model:cursor:smoke-model")
+        self.assertEqual(check["details"], "Workspace Trust Required\nPass --trust; token=[redacted]")
+
     def test_timeout_must_be_positive(self) -> None:
         result = subprocess.run(["bash", str(fixtures.SCRIPT), "doctor", "--timeout", "0"],
                                 env=self.env, text=True, capture_output=True)

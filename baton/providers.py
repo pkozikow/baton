@@ -679,7 +679,8 @@ PROVIDERS: dict[str, Provider] = {
                           "(the ID `agy --conversation` resumes); claim reads it when --session-id is omitted.",
         subagent_guidance="Use the `invoke_subagent` tool to start a fresh subagent."),
     "cursor": CursorProvider(
-        "cursor", "agent", args=("--print", "--output-format", "text", "--mode", "ask"),
+        # Fresh doctor/review directories need workspace trust even in read-only ask mode.
+        "cursor", "agent", args=("--print", "--output-format", "text", "--mode", "ask", "--trust"),
         prompt_delivery=PROMPT_STDIN, default_enabled=False, read_dir_flag="--add-dir",
         session_env="CURSOR_CONVERSATION_ID",
         skill_dir=".agents/skills",

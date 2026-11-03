@@ -285,7 +285,7 @@ class PlanReviewGoldenTest(ReviewRunnerFixture):
         # --tools is variadic: the prompt must stay after "--" so it is not taken as a tool name.
         self.assertEqual(calls["claude"][0]["args"], [*CLAUDE_REVIEW_ARGS, "--", prompt])
         self.assertEqual(calls["claude"][0]["stdin"], self.plan.read_text())
-        self.assertEqual(calls["cursor"][0]["args"], ["--print", "--output-format", "text", "--mode", "ask"])
+        self.assertEqual(calls["cursor"][0]["args"], ["--print", "--output-format", "text", "--mode", "ask", "--trust"])
         self.assertEqual(calls["cursor"][0]["stdin"], combined_text)
         # Only the encoded input is exposed in AGY's sandbox working directory.
         work = run_dir / "golden-plan-review-agy.work"
@@ -329,7 +329,7 @@ class PlanReviewGoldenTest(ReviewRunnerFixture):
                                                       (run_dir / "golden-plan-review.prompt.txt").read_text()])
         self.assertEqual(calls["codex"][0]["args"][1:3], ["--model", "vendor/x y"])
         self.assertEqual(calls["agy"][0]["args"][8:10], ["--model", "gem"])
-        self.assertEqual(calls["cursor"][0]["args"][5:], ["--model", "comp"])
+        self.assertEqual(calls["cursor"][0]["args"][6:], ["--model", "comp"])
         self.assertTrue((run_dir / "golden-plan-review-codex-vendor-x-y.md").is_file())
         self.assertIn("codex model: vendor/x y", result.stdout.splitlines())
 

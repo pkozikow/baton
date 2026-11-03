@@ -25,6 +25,9 @@ import time
 
 args = sys.argv[1:]
 provider = Path(sys.argv[0]).name
+if provider == 'agent' and '--trust' not in args:
+    print('Workspace Trust Required', file=sys.stderr)
+    raise SystemExit(1)
 with open(os.environ['DOCTOR_RECORD'], 'a') as handle:
     handle.write(json.dumps({'provider': provider, 'args': args, 'cwd': os.getcwd(),
                              'session': os.environ.get('CODEX_THREAD_ID')}) + '\n')
@@ -116,6 +119,9 @@ class DoctorSmokeTests(unittest.TestCase):
                                      ('agy', 'gemini'), ('agent', 'composer')])
         cursor = next(call for call in self.calls() if call['provider'] == 'agent')
         self.assertEqual(cursor['args'][:5], ['--print', '--output-format', 'text', '--mode', 'ask'])
+        self.assertIn('--trust', cursor['args'])
+        self.assertNotIn('--force', cursor['args'])
+        self.assertNotIn('--yolo', cursor['args'])
 
     def test_cursor_mapping_alone_opts_it_in(self) -> None:
         checks = model_checks({'model_tiers': {'cursor': {'weak': 'composer'}}})

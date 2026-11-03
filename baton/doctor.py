@@ -145,6 +145,10 @@ def main(argv: list[str] | None = None) -> int:
     else:
         for row in report["checks"]:
             print(f"{row['status'].upper():4} {row['name']}: {row['message']}")
+            details = row.get("details")
+            if row["status"] == "fail" and isinstance(details, str):
+                for line in details.splitlines():
+                    print(f"     {line}")
         state = "passed" if report["ok"] else "failed"
         suffix = " (some checks skipped)" if not report["complete"] else ""
         print(f"Doctor {state}{suffix}.")

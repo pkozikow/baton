@@ -178,7 +178,9 @@ distinct configured provider/model through the same provider review code used by
 `baton review run`, requiring a zero exit status.
 Configured tier targets are checked even when not currently selected. Literal model
 IDs are verified by the provider CLI accepting them and answering a small nonce prompt;
-`default` leaves model selection to the provider CLI. Cursor remains opt-in. Requests run
+`default` leaves model selection to the provider CLI. Cursor remains opt-in; its
+headless reviews and smoke tests accept workspace trust with `--trust` while
+retaining read-only ask mode. Requests run
 from temporary directories without project context and may consume normal provider
 usage. `--timeout SECONDS` sets the total budget per model (default 60 seconds),
 shared by Codex reasoning fallbacks, with up to 5 seconds for a timed-out CLI to
