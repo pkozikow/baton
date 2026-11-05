@@ -189,11 +189,19 @@ those files later change. Recurrence across projects requires at least two disti
 retros. A single retro produces appropriately limited findings, and an empty week
 produces a brief deterministic report without launching a model.
 
-All selected source contents must fit the conservative 48 KiB UTF-8 input budget
-(including prompt and manifest). Oversized weeks and providers without an established
-safe budget fail explicitly rather than silently analyzing a subset. Size gates run
-before reading/copying source blobs; oversized inputs can also make preview fail. There is no staged
-large-corpus analysis. No recommendations are implemented automatically.
+Each model invocation has a conservative 48 KiB UTF-8 input budget, including its
+prompt and source manifest. Weeks that exceed this budget are analyzed in batches
+of complete committed retros, followed by synthesis of the derived notes. Notes
+retain every batch source's citation and are limited to 8 KiB each; further bounded
+passes combine notes when needed. All selected sources remain in the final
+provenance, and recurrence still counts distinct projects, never batches.
+
+A single retrospective that cannot fit with its prompt and manifest, excessive
+source metadata, or a provider without an established safe budget fails explicitly
+rather than dropping evidence. Source-size checks run before copying oversized
+blobs; an individual oversized source can also make preview fail. `--timeout`
+is one total model-execution budget across all analysis and synthesis passes.
+No recommendations are implemented automatically.
 
 ### Persistence and recovery
 
@@ -213,4 +221,6 @@ file hashes match retained verified output; conflicting contents or symlinked
 outputs require manual inspection and are never overwritten. Commit/push retries
 reuse verified output without another model call. Results distinguish saved files,
 local commits and remote publication; network failure may leave a local commit.
+Until the final draft is verified, retries may rerun intermediate analyses against
+the same frozen sources; intermediate notes are not published as source evidence.
 Normal artifact reconciliation rules apply: never reset or rebase the shared checkout.
