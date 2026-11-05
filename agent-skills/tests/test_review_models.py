@@ -50,7 +50,8 @@ else:
         assert "--mode" in args and args[args.index("--mode") + 1] == "ask"
         assert "--output-format" in args and args[args.index("--output-format") + 1] == "text"
         assert "--print" in args
-        assert len(args) == 5 + 2 * ("--model" in args) + 2 * args.count("--add-dir"), args
+        assert "--trust" in args
+        assert len(args) == 6 + 2 * ("--model" in args) + 2 * args.count("--add-dir"), args
 if name == "codex" and os.environ.get("REVIEW_TEST_FAIL_REASONING"):
     effort = args[args.index("--config") + 1]
     if os.environ["REVIEW_TEST_FAIL_REASONING"] in effort:
