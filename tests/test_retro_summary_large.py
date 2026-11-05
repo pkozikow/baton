@@ -21,6 +21,7 @@ assert mapping in prompt
 assert all(text in prompt for text in inputs.values())
 assert 'do not use tools' in prompt.lower() or 'use no tools' in prompt.lower()
 intermediate = 'This is an intermediate evidence analysis' in prompt
+assert ('350–500' in prompt and '600–1000' not in prompt) if intermediate else '600–1000' in prompt
 sources = manifest['sources']
 output = 'Analysis for ' + ', '.join(source['project'] for source in sources) + '.\n'
 selected = sources[:1] if BEHAVIOR == 'missing' and intermediate else sources
