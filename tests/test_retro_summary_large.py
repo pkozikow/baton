@@ -15,8 +15,11 @@ prompt = sys.stdin.read()
 mapping = pathlib.Path('sources.json').read_text()
 manifest = json.loads(mapping)
 inputs = {source['input']: pathlib.Path(source['input']).read_text() for source in manifest['sources']}
-total = len(mapping.encode()) + len(prompt.encode()) + sum(len(text.encode()) for text in inputs.values())
+total = len(prompt.encode())
 assert total <= 48 * 1024, total
+assert mapping in prompt
+assert all(text in prompt for text in inputs.values())
+assert 'do not use tools' in prompt.lower() or 'use no tools' in prompt.lower()
 intermediate = 'This is an intermediate evidence analysis' in prompt
 sources = manifest['sources']
 output = 'Analysis for ' + ', '.join(source['project'] for source in sources) + '.\n'

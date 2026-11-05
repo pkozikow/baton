@@ -190,7 +190,9 @@ retros. A single retro produces appropriately limited findings, and an empty wee
 produces a brief deterministic report without launching a model.
 
 Each model invocation has a conservative 48 KiB UTF-8 input budget, including its
-prompt and source manifest. Weeks that exceed this budget are analyzed in batches
+instructions, source manifest, complete evidence and framing. Requests contain all
+of this input directly in the prompt, so providers need no file-reading or shell
+tools. Weeks that exceed this budget are analyzed in batches
 of complete committed retros, followed by synthesis of the derived notes. Notes
 retain every batch source's citation and are limited to 8 KiB each; further bounded
 passes combine notes when needed. All selected sources remain in the final
