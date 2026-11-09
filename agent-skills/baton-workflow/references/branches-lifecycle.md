@@ -103,22 +103,6 @@ subagent may then only set titles/descriptions with `gh pr edit`. Give it the
 entry's `pr_base` and prohibit repo ship/PR workflows, rebases, merges, pushes
 and `gh pr create`. Never run a repo's own PR/ship workflow on a stack child.
 
-## Merging PRs
-
-Never merge a PR without explicit user approval of the merge action for that
-PR or a clearly identified set of PRs. The same requirement applies to enabling
-auto-merge or any workflow that will merge a PR later.
-
-Approval to implement or execute a plan is not merge approval, even when the
-approved plan explicitly calls for merging. Passing checks, successful reviews,
-and implementation readiness do not grant merge approval either.
-
-Prepare the PR and complete the required checks and validation first. If the
-user has not already explicitly approved the merge action, present the PR links,
-readiness evidence and any remaining issues, then ask for merge approval. Proceed
-only within the scope explicitly approved by the user.
-
-
 ## Whole-project cleanup
 
 Before `baton cleanup`, run `baton retro [--selector <project>]` and await the owner-session fork completely. It reads the complete sibling [baton-retro skill](../../baton-retro/SKILL.md), writes `retro.md`, and archives relevant repository notes. The retro agent owns the final artifact and decides whether to delegate sections; it never claims ownership. For an unowned project or work outside the framework, read that skill completely and invoke it directly rather than inventing an owner session.
