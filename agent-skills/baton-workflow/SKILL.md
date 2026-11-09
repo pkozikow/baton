@@ -10,6 +10,10 @@ projects from anywhere, or when explicitly assigned Baton project work. The
 installed slot-root description is discovery metadata; `baton status --json`
 owns current project identity and paths. Operate only within the user's scope.
 
+Never merge a PR or enable auto-merge without explicit user approval of that
+merge action. Implementing or approving a plan that calls for a merge does not
+grant merge approval.
+
 Terms used throughout:
 
 - **Owner:** the session that claimed the project with `baton session claim`.

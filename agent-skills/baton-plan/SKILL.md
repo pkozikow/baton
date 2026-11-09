@@ -117,6 +117,10 @@ Output format:
 
 ## Phase 3: Implement
 
+- Never merge a PR or enable auto-merge without explicit user approval of that
+  merge action. Approval to implement a plan does not authorize a merge, even
+  when the plan calls for one. Follow
+  [Merging PRs](../baton-workflow/references/branches-lifecycle.md#merging-prs).
 - Confirm the plan is ready enough to implement.
 - Sync with the branch's expected PR base (`status --json`; the default branch outside the framework) before starting and after any major milestone. For native stack children, follow the multi-branch reference instead of pulling or merging the default branch.
 - Make the required code changes and add focused tests for new behavior.

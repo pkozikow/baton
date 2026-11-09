@@ -13,9 +13,9 @@ exact command to run.
 
 ## Member retirement
 
-Whenever a member's PR is merged, whether by the user or directly by an agent,
-the parent agent must run `baton branch cleanup <repo> <member>` as the
-normal follow-up, without waiting for a separate cleanup request or project
+Whenever a member's PR is merged, the parent agent must run
+`baton branch cleanup <repo> <member>` as the normal follow-up, without waiting
+for a separate cleanup request or project
 closure. The readiness, integration and safety requirements below still apply.
 If checks block cleanup, report the blocker and keep it pending until resolved;
 do not automatically override checks or discard work just because the PR merged.
@@ -102,6 +102,21 @@ member's `pr_base`, including repository-required note/archive guards. A PR
 subagent may then only set titles/descriptions with `gh pr edit`. Give it the
 entry's `pr_base` and prohibit repo ship/PR workflows, rebases, merges, pushes
 and `gh pr create`. Never run a repo's own PR/ship workflow on a stack child.
+
+## Merging PRs
+
+Never merge a PR without explicit user approval of the merge action for that
+PR or a clearly identified set of PRs. The same requirement applies to enabling
+auto-merge or any workflow that will merge a PR later.
+
+Approval to implement or execute a plan is not merge approval, even when the
+approved plan explicitly calls for merging. Passing checks, successful reviews,
+and implementation readiness do not grant merge approval either.
+
+Prepare the PR and complete the required checks and validation first. If the
+user has not already explicitly approved the merge action, present the PR links,
+readiness evidence and any remaining issues, then ask for merge approval. Proceed
+only within the scope explicitly approved by the user.
 
 
 ## Whole-project cleanup

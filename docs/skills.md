@@ -36,6 +36,11 @@ Phase 4 uses independent workers to exercise acceptance and recheck fixes.
 Custom project harnesses and reports live under `validation/` beside the plan.
 See the [validation procedure](../agent-skills/baton-plan/references/validation.md).
 
+PR merges require explicit user approval of the merge action, including enabling
+auto-merge. Approval to implement a plan does not authorize merging, even when
+the plan calls for a merge. See
+[Merging PRs](../agent-skills/baton-workflow/references/branches-lifecycle.md#merging-prs).
+
 ## Review runners
 
 The bundled `baton-plan/scripts/plan-peer-review.sh` and
