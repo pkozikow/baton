@@ -41,11 +41,11 @@ artifact paths for direct inspection when needed.
 
 Use the installed `baton` CLI. If unavailable, run `install.sh` from a clean `main` checkout of the user's configured Baton source repository; it prints the bin directory that holds `baton`. Inspect effective paths with `baton config show`; do not assume personal checkout locations or replace configured roots. Use `baton list` before creating or renaming projects. `baton init` creates missing configured slots only within authorized setup.
 
-A configured slot is a coordinator, not a code repository. Inspect its `project.json` and `baton status --json` for participating repositories, registered paths, and `owner`. If new project work requires an active project and none exists, ask which project and repositories to use; never guess or silently create one. Discovery and historical questions follow the read-only workflow above. Status exits 3 outside a project. When cwd and Git branch do not match a registered active entry, supply an explicit project: `status`, `path`, `cleanup`, `abandon` and `rename` take it positionally (for example `baton status <project> --json`); other project-scoped commands use `--selector <project>`, except `add`, which acts on the current project only. Plain `baton status` prints the exact resume command for pending operations: use that command rather than starting a competing operation.
+A configured slot is a coordinator, not a code repository. Inspect its `project.json` and `baton status --json` for participating repositories, registered paths, and `owner`. If new project work requires an active project and none exists, ask which project and repositories to use; never guess or silently create one. Discovery and historical questions follow the read-only workflow above. Status exits 3 outside a project. When cwd and Git branch do not match a registered active entry, use `--selector <project>` on project-scoped commands, including `status`, `path`, `rename`, `cleanup`, `abandon`, and `add`. Select by name, full UUID, or current slot; active/archived eligibility still depends on the command. The positional project forms of `status`, `path`, `rename`, `cleanup`, and `abandon` remain accepted, but cannot be combined with `--selector`. To create from anywhere, use `baton create <name> --selector p1 --repos <repo>...`: creation accepts only target slots `p1` through `p10`, and defaults to the current coordinator when omitted. Global `list`, `init`, `search`, and `doctor`, and aggregate `retro pending` and `retro summarize`, do not select a project. Plain `baton status` prints the exact resume command for pending operations: use that command rather than starting a competing operation.
 
 Take project `name`, `uuid`, `master_path`, `current_entry`, every `subplan_path`, `pr_base`, and diffable `base_ref` from status. If `base_reliable` is false, stop and report `base_error`; never substitute the default branch. A child's `needs_rebase: true` requires parent-coordinated group rebase before review or publication.
 
-Resolve code paths with `baton path <project> <repo> [--member <name>]`. Take member checkouts from status `entries[]` (`member`, `link`, `path`), not `project.json` keys. Coordinator links: named checkouts use `repos/<repo>--<name>`, including the named `first_member`; unnamed checkouts use `repos/<repo>`. Naming the first checkout changes neither project nor coordinator name. Do not reconstruct paths from names, branch prefixes, or current defaults; projects retain their registered paths and branches. New branches use the configured prefix (default `baton`, giving `baton/<project>`).
+Resolve code paths with `baton path --selector <project> <repo> [--member <name>]`; with this flag, the positional argument is the repository. The old `baton path <project> <repo>` form remains accepted. Take member checkouts from status `entries[]` (`member`, `link`, `path`), not `project.json` keys. Coordinator links: named checkouts use `repos/<repo>--<name>`, including the named `first_member`; unnamed checkouts use `repos/<repo>`. Naming the first checkout changes neither project nor coordinator name. Do not reconstruct paths from names, branch prefixes, or current defaults; projects retain their registered paths and branches. New branches use the configured prefix (default `baton`, giving `baton/<project>`).
 
 ## Session identity and authority
 
@@ -74,9 +74,10 @@ Authoritative project artifacts deliberately use the configured shared primary a
 
 ## Create a follow-up from historical work
 
-Only when the user authorizes a new project, enter a coordinator slot and run
-`baton create follow-up --from FULL_UUID` using the archived predecessor's exact
-UUID. The command derives `original-followup`, then `original-followup2` and so on
+Only when the user authorizes a new project, run
+`baton create follow-up --selector p1 --from FULL_UUID` using the archived predecessor's
+exact UUID and the intended target slot. Omit `--selector` when already in that
+coordinator slot. The command derives `original-followup`, then `original-followup2` and so on
 from saved lineage metadata, even after a follow-up rename. Active names and
 previous-name collisions require resolution, never silently skip numbers.
 The verified recorded source checkouts supply freshly fetched current defaults;

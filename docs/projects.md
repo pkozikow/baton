@@ -58,6 +58,29 @@ commands should use the selected UUID: an active name or previous name takes
 precedence over an archived name, slots select current occupants, and ambiguous archived names
 require a full UUID. Finding a project does not reopen it or authorize new work.
 
+## Project selectors
+
+Project-scoped commands accept `--selector PROJECT` from any directory. Selectors
+use a project name, full UUID, or current slot (`p1` through `p10`); commands retain
+their active/archived eligibility rules. Without a selector, commands infer the
+current project as before. `status`, `path`, `rename`, `cleanup`, and `abandon` also
+retain their positional project forms; do not combine a positional project with
+`--selector`.
+
+Use `baton add --selector PROJECT REPO...` to add repositories to a selected
+project. Use `baton path --selector PROJECT [REPO] [--member NAME]` for its registered
+paths: with `--selector`, a single positional argument is the repository. The old
+`baton path [PROJECT] [REPO] [--member NAME]` form remains accepted.
+
+Creation instead selects a target slot: `baton create NAME --selector p1 --repos REPO...`
+works from anywhere. Only `p1` through `p10` are accepted here; omitting
+`--selector` still uses the current coordinator slot. This also applies to
+`create follow-up --from UUID`.
+
+Existing project-scoped commands retain their `--selector` support. Global
+`list`, `init`, `search`, and `doctor`, and aggregate `retro pending` and
+`retro summarize`, do not select a project.
+
 ## Coordinator slots
 
 Coordinator slots and their idle branches are `p1` through `p10`; these names are
@@ -102,7 +125,7 @@ name, branch, and destination-path conflicts remain errors.
 
 | Command | Purpose |
 | --- | --- |
-| `baton add REPO...` | Add repositories to the current project |
+| `baton add REPO... [--selector PROJECT]` | Add repositories to a project |
 | `baton rename NAME [PROJECT]` | Rename a project; the previous name stays selectable |
 | `baton path [PROJECT] [REPO] [--member NAME]` | Print a registered checkout path |
 | `baton list` | List the coordinator slots and their projects |
