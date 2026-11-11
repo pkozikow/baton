@@ -189,7 +189,8 @@ class MembersMixin(ManagerCore):
             with self.native_lock(repo, create=True):
                 native_catalog(repo)
             for entry in entries(repo):
-                self.validate_clean_repo(entry)
+                # Independent adds leave existing checkouts and their history untouched.
+                self.validate_clean_repo(entry, allow_dirty=action == "add" and after is None)
             ensure_stack_records(repo)
             pending = dict(signature)
             if action == "init":

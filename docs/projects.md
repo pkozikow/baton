@@ -95,6 +95,11 @@ their current branches. Only the project parent changes branch topology or publi
 stacks; use the bundled planning skill's multi-branch reference for coordination
 details.
 
+Independent `baton branch add` operations allow uncommitted changes in existing
+members because they create a separate worktree from the default branch.
+Stacked additions (`--after`) still require clean registered worktrees. Member
+name, branch, and destination-path conflicts remain errors.
+
 | Command | Purpose |
 | --- | --- |
 | `baton add REPO...` | Add repositories to the current project |

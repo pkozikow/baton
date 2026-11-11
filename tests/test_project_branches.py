@@ -134,6 +134,74 @@ class ProjectBranchesTest(unittest.TestCase):
         self.assertIn("main", status)
         self.assertEqual(self.git(self.slots / "p3", "status", "--porcelain"), "")
 
+    def test_independent_add_preserves_dirty_members_and_native_stack(self) -> None:
+        first = self.init_members()
+        source = self.repos / "alpha"
+        self.commit_file(first, "api.txt", "Committed parent change\n")
+        child = self.add_member("api-tests", after="api")
+        sibling = self.add_member("cli-quirks")
+        latest = self.commit_file(source, "upstream.txt", "Fresh default branch\n")
+        self.git(source, "push")
+        paths = (first, child, sibling)
+        for path in paths:
+            readme = path / "README.md"
+            readme.write_text(readme.read_text() + "Staged worker edit\n")
+            self.git(path, "add", "README.md")
+            readme.write_text(readme.read_text() + "Unstaged worker edit\n")
+            (path / "unfinished.txt").write_bytes(b"Worker is mid-edit.\n")
+        before = {path: tuple(self.git(path, *args) for args in (
+            ("status", "--porcelain", "--untracked-files=all"), ("diff", "--binary"),
+            ("diff", "--cached", "--binary"), ("rev-parse", "HEAD"), ("branch", "--show-current")))
+                  for path in paths}
+        catalog = self.catalog(source)
+
+        added = self.add_member("parallel", cwd=sibling)
+
+        self.assertEqual(self.git(added, "rev-parse", "HEAD"), latest)
+        self.assertTrue((added / "upstream.txt").is_file())
+        self.assertFalse((added / "api.txt").exists())
+        self.assertFalse((added / "unfinished.txt").exists())
+        self.assertEqual(self.catalog(source), catalog)
+        for path in paths:
+            self.assertEqual(tuple(self.git(path, *args) for args in (
+                ("status", "--porcelain", "--untracked-files=all"), ("diff", "--binary"),
+                ("diff", "--cached", "--binary"), ("rev-parse", "HEAD"), ("branch", "--show-current"))),
+                             before[path])
+            self.assertEqual((path / "unfinished.txt").read_bytes(), b"Worker is mid-edit.\n")
+
+    def test_stacked_add_still_rejects_dirty_registered_members(self) -> None:
+        first = self.init_members()
+        self.commit_file(first, "api.txt", "Committed parent change\n")
+        child = self.add_member("api-tests", after="api")
+        self.commit_file(child, "tests.txt", "Committed child change\n")
+        sibling = self.add_member("cli-quirks")
+        before = (self.slots / "p3" / "project.json").read_bytes()
+        catalog = self.catalog(self.repos / "alpha")
+        for path in (first, child, sibling):
+            with self.subTest(dirty_member=path.name):
+                unfinished = path / "unfinished.txt"
+                unfinished.write_text("Worker is mid-edit.\n")
+                result = self.cli("branch", "add", "alpha", "blocked", "--after", "api-tests",
+                                  cwd=self.slots / "p3", ok=False)
+                self.assertIn(f"Worktree has dirty or untracked files: {path}", result.stderr)
+                self.assertEqual((self.slots / "p3" / "project.json").read_bytes(), before)
+                self.assertEqual(self.catalog(self.repos / "alpha"), catalog)
+                self.assertFalse(self.checkout("alpha", "example--blocked").exists())
+                self.assertEqual(unfinished.read_text(), "Worker is mid-edit.\n")
+                unfinished.unlink()
+
+    def test_first_member_init_still_rejects_dirty_worktree(self) -> None:
+        self.make_repo("alpha")
+        self.create("alpha")
+        checkout = self.checkout("alpha")
+        unfinished = checkout / "unfinished.txt"
+        unfinished.write_text("Worker is mid-edit.\n")
+        result = self.cli("branch", "init", "alpha", "api", cwd=self.slots / "p3", ok=False)
+        self.assertIn(f"Worktree has dirty or untracked files: {checkout}", result.stderr)
+        self.assertTrue(checkout.is_dir())
+        self.assertFalse(self.checkout("alpha", "example--api").exists())
+        self.assertEqual(unfinished.read_text(), "Worker is mid-edit.\n")
+
     def test_empty_independent_siblings_are_allowed_but_cannot_become_parents(self) -> None:
         first = self.init_members()
         self.add_member("docs")
@@ -219,7 +287,9 @@ class ProjectBranchesTest(unittest.TestCase):
             self.assertEqual(self.git(path, "branch", "--show-current"), "baton/" + path.name)
 
     def test_branch_and_path_collisions_preserve_inventory(self) -> None:
-        self.init_members()
+        first = self.init_members()
+        unfinished = first / "unfinished.txt"
+        unfinished.write_text("Worker is mid-edit.\n")
         source = self.repos / "alpha"
         self.git(source, "branch", "baton/example--existing")
         occupied = self.checkout("alpha", "example--occupied")
@@ -229,9 +299,12 @@ class ProjectBranchesTest(unittest.TestCase):
         dangling.symlink_to(self.root / "missing")
         before = (self.slots / "p3" / "project.json").read_bytes()
         for name in ("api", "existing", "occupied", "dangling", "../outside", "nested/name"):
-            self.cli("branch", "add", "alpha", name, cwd=self.slots / "p3", ok=False)
+            result = self.cli("branch", "add", "alpha", name, cwd=self.slots / "p3", ok=False)
+            if name in ("api", "existing", "occupied", "dangling"):
+                self.assertIn("already", result.stderr)
             self.assertEqual((self.slots / "p3" / "project.json").read_bytes(), before)
         self.assertEqual((occupied / "keep.txt").read_text(), "Foreign files\n")
+        self.assertEqual(unfinished.read_text(), "Worker is mid-edit.\n")
 
     def test_member_destination_checks_pending_branch_and_path_claims_without_mutating(self) -> None:
         self.init_members()
@@ -277,7 +350,9 @@ class ProjectBranchesTest(unittest.TestCase):
                 self.assertEqual(self.catalog(source)["stacks"], [])
 
     def test_independent_add_resumes_after_coordinator_commit_failure(self) -> None:
-        self.init_members()
+        first = self.init_members()
+        unfinished = first / "unfinished.txt"
+        unfinished.write_text("Worker is mid-edit.\n")
         hooks = self.root / "hooks"
         hooks.mkdir()
         hook = hooks / "pre-commit"
@@ -292,6 +367,7 @@ class ProjectBranchesTest(unittest.TestCase):
         self.cli("branch", "add", "alpha", "docs", cwd=self.slots / "p3")
         self.assertEqual(self.git(self.member("docs"), "rev-parse", "HEAD"), tip)
         self.assertEqual(self.git(self.slots / "p3", "status", "--porcelain"), "")
+        self.assertEqual(unfinished.read_text(), "Worker is mid-edit.\n")
 
     def test_dependency_add_recovers_after_native_add_succeeds_then_fails(self) -> None:
         first = self.init_members()
