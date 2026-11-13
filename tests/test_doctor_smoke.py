@@ -25,6 +25,9 @@ import time
 
 args = sys.argv[1:]
 provider = Path(sys.argv[0]).name
+if args[-3:] == ['mcp', 'list', '--json']:
+    print('[]')
+    raise SystemExit(0)
 if provider == 'agent' and '--trust' not in args:
     print('Workspace Trust Required', file=sys.stderr)
     raise SystemExit(1)
@@ -47,7 +50,7 @@ if behavior == 'timeout' and provider == 'codex':
     Path(os.environ['DOCTOR_CHILD']).write_text(str(child.pid))
     time.sleep(60)
 if behavior == 'budget' and provider == 'codex':
-    time.sleep(0.8)
+    time.sleep(1.2)
 if behavior == 'wrong':
     nonce = 'wrong output'
 if behavior == 'echo':
@@ -213,12 +216,15 @@ class DoctorSmokeTests(unittest.TestCase):
         os.environ['DOCTOR_BEHAVIOR'] = 'budget'
         os.environ['PEER_REVIEW_CODEX_AUTO_FALLBACK'] = '1'
         started = time.monotonic()
-        checks = model_checks({}, timeout=2)
+        # The budget also covers Codex's MCP server listing before the first attempt.
+        checks = model_checks({}, timeout=3)
         elapsed = time.monotonic() - started
         codex = next(check for check in checks if check['name'] == 'model:codex:default')
         self.assertEqual(codex['status'], 'fail', checks)
-        self.assertIn('exit 124', codex['message'])
-        self.assertLess(elapsed, 3.5)
+        # The deadline either stops an attempt (124) or leaves no time for the next fallback, when the last
+        # attempt's own failure (7) stands; either way all attempts fit in one budget.
+        self.assertRegex(codex['message'], r'\(exit (124|7)\)')
+        self.assertLess(elapsed, 4.5)
         self.assertGreater(sum(call['provider'] == 'codex' for call in self.calls()), 1)
 
     def test_relative_binary_override_resolves_before_entering_private_directory(self) -> None:

@@ -24,7 +24,9 @@ WORKFLOW = "baton-workflow"
 SLOTS_ROOT_PLACEHOLDER = "{{BATON_SLOTS_ROOT}}"
 # Today's targets stay installed even when their harness is absent.
 FLOOR = (".agents/skills", ".claude/skills")
-SKILLS = ("baton-plan", "baton-plan-review-executor", "baton-peer-review", "baton-peer-review-executor", "baton-review-loop", "baton-retro", WORKFLOW)
+SKILLS = ("baton-plan", "baton-peer-review", "baton-review-executor", "baton-review-loop", "baton-retro", WORKFLOW)
+# Skills earlier releases installed; a reinstall removes their links when they still point where the manifest says.
+RETIRED_SKILLS = ("baton-plan-review-executor", "baton-peer-review-executor")
 
 
 def bundled_skills() -> Path:
@@ -45,7 +47,7 @@ def _manifest(target: Path) -> dict[str, Any]:
     if not isinstance(data, dict) or data.get("format") not in (1, 2) or not isinstance(data.get("links"), dict):
         raise ValueError(f"Invalid skill ownership manifest: {path}")
     links = data["links"]
-    if any(name not in SKILLS or not isinstance(source, str) for name, source in links.items()):
+    if any(name not in (*SKILLS, *RETIRED_SKILLS) or not isinstance(source, str) for name, source in links.items()):
         raise ValueError(f"Invalid managed skill links: {path}")
     workflow = data.get("workflow") if data["format"] == 2 else None
     if data["format"] == 2:
@@ -94,8 +96,6 @@ def install_skills(targets: list[Path], source: Path | None = None) -> list[Path
     for name in SKILLS:
         if not (source / name / "SKILL.md").is_file():
             raise ValueError(f"Missing skill: {source / name / 'SKILL.md'}")
-    if not (source / "review-runner-lib.sh").is_file():
-        raise ValueError(f"Missing shared review helper: {source}")
     content = _workflow_content(source)
     workflow = {"sha256": hashlib.sha256(content.encode()).hexdigest(), "links": {
         path.name: str(path) for path in sorted((source / WORKFLOW).iterdir()) if path.name != "SKILL.md"}}
@@ -118,6 +118,11 @@ def install_skills(targets: list[Path], source: Path | None = None) -> list[Path
                     if not path.is_symlink() or previous is None or os.readlink(path) != previous:
                         raise ValueError(f"Refusing to replace unmanaged skill: {path}; move it explicitly before installing")
         for target in targets:
+            for name in RETIRED_SKILLS:
+                path = target / name
+                previous = manifests[target]["links"].get(name)
+                if previous is not None and path.is_symlink() and os.readlink(path) == previous:
+                    path.unlink()
             links = {}
             for name in SKILLS:
                 path = target / name

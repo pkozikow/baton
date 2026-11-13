@@ -43,7 +43,8 @@ dispatcher. Never switch branches; read repository instructions and honor base
 reliability/stale-child checks. Provider CLI subprocesses are not project workers.
 
 The dispatcher owns durable review status and outcomes in the project's board
-and relevant assignment, when applicable. It awaits the specialist and every
+and relevant assignment, when applicable, and saves each review run to the
+project's artifacts with `baton review save`. It awaits the specialist and every
 launched process before applying fixes or returning; a yielded process is not
 completion. Specialists return triaged findings, artifact paths and coverage or
 failure details. They never claim or settle project tasks.

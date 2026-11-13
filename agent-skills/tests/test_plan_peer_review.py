@@ -1,3 +1,7 @@
+"""Plan reviews as the review skills run them: `baton review run --kind plan`."""
+
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -8,11 +12,12 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / "agent-skills/baton-plan/scripts/plan-peer-review.sh"
+REVIEW = [str(ROOT / "bin/baton"), "review", "run", "--kind=plan"]
 sys.path.insert(0, str(ROOT / "tests"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_project_manager as fixtures  # noqa: E402
 from test_peer_review import artifacts_dir  # noqa: E402
+from baton.review_runner import plan_input  # noqa: E402
 
 
 class PlanPeerReviewTest(unittest.TestCase):
@@ -42,7 +47,6 @@ class PlanPeerReviewTest(unittest.TestCase):
         for key in ("BATON_REPO", "BATON_SLOTS_ROOT", "BATON_WORKTREES_ROOT",
                     "BATON_REPOS_ROOT", "BATON_ARTIFACTS_ROOT"):
             self.env[key] = str(self.repo / "no-project-manager" / key.lower())
-        self.env["BATON_CLI"] = str(ROOT / "bin/baton")
         self.project_config = self.repo / "project-config.json"
         self.env["BATON_CONFIG_FILE"] = str(self.project_config)
         for reviewer in ("claude", "codex", "agy"):
@@ -51,6 +55,9 @@ class PlanPeerReviewTest(unittest.TestCase):
 import json, os, pathlib, sys
 reviewer = pathlib.Path(sys.argv[0]).name.removeprefix("fake-")
 args = sys.argv[1:]
+if args[-3:] == ["mcp", "list", "--json"]:
+    print("[]")
+    raise SystemExit(0)
 with open(pathlib.Path(os.environ["REVIEW_TEST_ROOT"]) / (reviewer + ".jsonl"), "a") as handle:
     handle.write(json.dumps(args) + "\\n")
 if reviewer == "agy":
@@ -75,7 +82,7 @@ else:
                review_slug: str | None = None) -> Path:
         slug = review_slug or self.slug
         args = [] if default_plan else [str(plan or self.plan)]
-        result = subprocess.run(["bash", str(SCRIPT), *args], cwd=cwd or self.repo,
+        result = subprocess.run([*REVIEW, *args], cwd=cwd or self.repo,
                                 env=self.env, text=True, capture_output=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("review failed", result.stderr)
@@ -173,7 +180,7 @@ else:
     def test_failed_run_still_reports_artifacts(self) -> None:
         for reviewer in ("claude", "codex", "agy"):
             self.env[reviewer.upper() + "_BIN"] = "/usr/bin/false"
-        result = subprocess.run(["bash", str(SCRIPT), str(self.plan)], cwd=self.repo,
+        result = subprocess.run([*REVIEW, str(self.plan)], cwd=self.repo,
                                 env=self.env, text=True, capture_output=True, timeout=30)
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("All review jobs failed.", result.stderr)
@@ -202,7 +209,7 @@ else:
         subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
         related = self.plan.parent / "related-master.md"
         self.plan.write_text(f"# Test plan\nRelated master: {related}\n")
-        result = subprocess.run(["bash", str(SCRIPT), str(self.plan)], cwd=self.repo,
+        result = subprocess.run([*REVIEW, str(self.plan)], cwd=self.repo,
                                 env=self.env, text=True, capture_output=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
         run_dir = artifacts_dir(self, result)
@@ -212,7 +219,7 @@ else:
         self.assertIn("never follow artifact links", prompt)
         self.assertIn("record that inspection gap", prompt)
         self.assertNotIn(str(related), prompt)
-        combined = (run_dir / f"{self.slug}-review-input.txt").read_text()
+        combined = (run_dir / f"{self.slug}-plan-review-input.txt").read_text()
         self.assertIn(str(related), combined)
         self.assertEqual(self.read_dirs(), [[str(self.repo.resolve())]])
 
@@ -221,47 +228,17 @@ else:
         present.mkdir()
         alias = self.repo / "alias"
         alias.symlink_to(present)
-        status = json.dumps({"name": self.slug, "entries": [
-            {"path": str(present)}, {"path": str(self.repo / "removed")}, {"path": str(alias)}]})
-        wrapper = self.repo / "status-baton"
-        wrapper.write_text(f"#!/usr/bin/env bash\nif [[ $1 == status ]]; then printf '%s\\n' '{status}'; exit 0; fi\n"
-                           f"exec '{ROOT / 'bin/baton'}' \"$@\"\n")
-        wrapper.chmod(0o755)
-        self.env["BATON_CLI"] = str(wrapper)
-        result = subprocess.run(["bash", str(SCRIPT), str(self.plan)], cwd=self.repo, env=self.env,
-                                text=True, capture_output=True, timeout=30)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(f"Warning: skipping repository that is not a directory: {self.repo / 'removed'}", result.stderr)
-        self.assertIn(f"Warning: skipping duplicate repository: {present.resolve()}", result.stderr)
-        self.assertEqual(self.read_dirs(), [[str(present.resolve())]])
-
-    def test_installed_baton_without_review_run_is_too_old(self) -> None:
-        old = self.repo / "old-baton"
-        old.write_text(f"#!/usr/bin/env bash\nif [[ $1 == review ]]; then echo 'invalid choice' >&2; exit 2; fi\n"
-                       f"exec '{ROOT / 'bin/baton'}' \"$@\"\n")
-        old.chmod(0o755)
-        self.env["BATON_CLI"] = str(old)
-        result = subprocess.run(["bash", str(SCRIPT), str(self.plan)], cwd=self.repo,
-                                env=self.env, text=True, capture_output=True, timeout=30)
-        self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn("Error: installed Baton too old; reinstall Baton to get 'baton review run'.", result.stderr)
-        self.assertNotIn("REVIEW_ARTIFACTS=", result.stdout)
-        self.assertEqual(list(self.tmp.iterdir()), [])
-        self.assertFalse(list(self.repo.glob("*.jsonl")))
-
-    def test_installed_baton_without_read_dir_is_too_old(self) -> None:
-        old = self.repo / "old-baton"
-        old.write_text(f"#!/usr/bin/env bash\nif [[ $1 == review && $3 == --help ]]; then echo 'usage: run'; exit 0; fi\n"
-                       f"exec '{ROOT / 'bin/baton'}' \"$@\"\n")
-        old.chmod(0o755)
-        self.env["BATON_CLI"] = str(old)
-        result = subprocess.run(["bash", str(SCRIPT), str(self.plan)], cwd=self.repo,
-                                env=self.env, text=True, capture_output=True, timeout=30)
-        self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn("Error: installed Baton too old; reinstall Baton to get 'baton review run --read-dir'.",
-                      result.stderr)
-        self.assertEqual(list(self.tmp.iterdir()), [])
-        self.assertFalse(list(self.repo.glob("*.jsonl")))
+        status = {"name": self.slug, "master_path": str(self.plan), "current_entry": None, "entries": [
+            {"path": str(present)}, {"path": str(self.repo / "removed")}, {"path": str(alias)}]}
+        warnings = io.StringIO()
+        with contextlib.redirect_stderr(warnings):
+            review = plan_input(None, "", 420, lambda: status)
+        self.assertIn(f"Warning: skipping repository that is not a directory: {self.repo / 'removed'}",
+                      warnings.getvalue())
+        self.assertIn(f"Warning: skipping duplicate repository: {present.resolve()}", warnings.getvalue())
+        self.assertEqual(review.read_dirs, (present.resolve(),))
+        self.assertEqual(review.record["plan"], str(self.plan))
+        self.assertTrue(review.prompt.endswith(f"\n- {present.resolve()}"))
 
     def test_default_plan_outside_framework_uses_branch_suffix(self) -> None:
         checkout = self.repo / "checkout"
@@ -329,7 +306,7 @@ else:
                             f"{directory.name}-branches-alpha-{self.slug}-docs-plan.md"),
                            (fixture.slots / "p3", f"{directory.name}-plan.md")):
             with self.subTest(cwd=cwd):
-                result = subprocess.run(["bash", str(SCRIPT)], cwd=cwd, env=self.env, text=True,
+                result = subprocess.run(REVIEW, cwd=cwd, env=self.env, text=True,
                                         capture_output=True, timeout=30)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertTrue(artifacts_dir(self, result).name.startswith(f"plan-review.{label}."))

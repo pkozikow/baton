@@ -72,15 +72,13 @@ When drafting or refining the plan:
 
 ### Plan review delegation
 
-Use the same agent structure as `baton-peer-review`: the main agent coordinates
-the task, a dedicated worker runs and triages the reviews, and the runner launches
-the configured plan reviewers in parallel.
+Read the complete [baton-peer-review](../baton-peer-review/SKILL.md) and dispatch
+through it with `Kind: plan`, the absolute repository and plan paths,
+`Reviewers: configured`, relevant requirements/constraints as `Extra review focus`,
+authorized read scope and final-report requirements. It owns worker dispatch, the
+executor handoff and saving the run.
 
-Follow the required Worker dispatch policy for model selection and fresh context. Give the worker the resolved [plan review executor](../baton-plan-review-executor/SKILL.md) path, absolute repository and plan paths, `Reviewers: configured`, relevant requirements/constraints as `Extra review focus`, authorized read scope, and final-report requirements. Require a complete executor read and no further subagents. Read explicitly authorized master/sibling plans or findings outside repository roots and include relevant excerpts in `Extra review focus`; a pathname there is not a runtime read grant. Do not silently omit requested context.
-
-Follow the complete [Review-only specialists](../baton-workflow/references/coordination.md#review-only-specialists) section.
-
-Use the worker's final triaged report to update the plan; keep raw output and triage in the worker. Do not run the helper or read its raw review artifacts in the main agent unless the worker's report is obviously incomplete. Report failures or partial coverage honestly; do not silently take over a failed worker or run a second triage pass. The executor owns runner invocation, artifact interpretation and the triage rubric.
+Use the worker's final triaged report to update the plan; keep raw output and triage in the worker. Do not run the runner or read its raw review artifacts in the main agent unless the worker's report is obviously incomplete. Report failures or partial coverage (N of M reviewers) honestly; do not silently take over a failed worker or run a second triage pass.
 
 ### Applying review findings (main agent)
 

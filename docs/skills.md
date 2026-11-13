@@ -16,9 +16,10 @@ All other skills require explicit invocation, with both
   branch lifecycle, plus project discovery from any directory.
 - `baton-plan`: planning, plan readiness, implementation, independent execution QA,
   and multi-branch coordination.
-- `baton-plan-review-executor`: internal plan review execution and triage.
-- `baton-peer-review`: review delegation.
-- `baton-peer-review-executor`: internal review execution and triage.
+- `baton-peer-review`: the review dispatcher for plan reviews, branch peer reviews
+  and review-loop passes; it also saves each run.
+- `baton-review-executor`: internal plan and implementation review execution and
+  triage.
 - `baton-review-loop`: a configurable focused-review list followed by a bounded
   number of general rounds; either phase can be disabled.
 - `baton-retro`: evidence-based project retrospective and note archival.
@@ -36,23 +37,21 @@ Phase 4 uses independent workers to exercise acceptance and recheck fixes.
 Custom project harnesses and reports live under `validation/` beside the plan.
 See the [validation procedure](../agent-skills/baton-plan/references/validation.md).
 
-## Review runners
+## Review runs
 
-The bundled `baton-plan/scripts/plan-peer-review.sh` and
-`baton-peer-review-executor/scripts/peer-review.sh` scripts assemble the review
-input and prompt, then run the reviewers through `baton review run`. They use only
-the installed `baton` command on PATH (`BATON_CLI` can explicitly pin another
-executable for testing) and stop with "installed Baton too old; reinstall" when
-that command has no `review run`. `baton review run --check` validates the
-reviewer selection, environment overrides and models before the scripts create a
-run directory or fetch; `baton review run` then runs the reviewers in parallel
-and prints `<provider> review: <path|unavailable>`, `<provider> log:` and
-`<provider> model:` lines. Neither the scripts nor `baton review run` needs a
-trusted runtime: they only read configuration and write inside the run directory.
-If every reviewer fails, the runner prints "All review jobs failed" and exits 1.
-`peer-review.sh` exits 0 without running reviewers when the diff is empty. Reviewers run in their own
-process groups, so interrupting or terminating `baton review run` (SIGINT or
-SIGTERM) kills every reviewer group and exits with 130 or 143.
+`baton review run --kind plan [PLAN_FILE]` and `baton review run --kind
+implementation [BASE_REF]` resolve what to review, write the reviewer input and
+prompt into a new private run directory under `$TMPDIR` (runs of the same kind
+older than seven days are pruned), run the selected reviewers in parallel and print
+`<provider> review: <path|failed (reason)>`, `<provider> log:`, `<provider> model:`
+and a `Coverage: N of M reviewers produced a review` line, then
+`REVIEW_ARTIFACTS=<dir>` last. It needs no trusted runtime: it only reads
+configuration and project metadata and writes inside its run directory. A run
+succeeds when at least one reviewer produces a review; otherwise it prints "All
+review jobs failed" and exits 1. Reviewers run in their own process groups, so
+interrupting or terminating the run (SIGINT or SIGTERM) kills every reviewer group
+and exits with 130 or 143. The skills invoke the `baton` on `PATH`, which the same
+installation provides.
 
 Plan selection uses authoritative status paths; outside the framework,
 `PLAN_REVIEW_PROJECTS_ROOT` or `BATON_ARTIFACTS_ROOT` overrides the effective
@@ -61,28 +60,115 @@ artifact root from `baton config show --section paths` (see
 The branch prefix comes from `baton config show --section branch_prefix` (default `baton`, giving `baton/<project>` branches).
 
 Reviewer sets, model choices and per-run overrides are described in
-[Configuration](configuration.md#review-models). Run either helper with `--help`
-for executable overrides, timeouts and Codex reasoning controls. Missing reviewer
-CLIs are skipped with warnings; no available requested CLI is an error.
+[Configuration](configuration.md#review-models). `baton review run --help` lists
+executable overrides, timeouts, size limits and Codex reasoning controls. Missing
+reviewer CLIs are skipped with warnings and count against coverage; no available
+requested CLI is an error.
 
 Plan reviewers look first for unnecessary complexity, then correctness, sequencing
 and rollback safety, tagging each finding `code-verified` or `plan-only`. They may
 read the active project worktrees (outside the framework, the current checkout);
 the plan is embedded in their input, and any other context, such as related plans,
-must be embedded as extra review focus (`PLAN_REVIEW_EXTRA_PROMPT`). Plan reviews
-default to a 420-second timeout and implementation reviews, which stay diff-only,
-to 300 seconds.
+must be embedded as extra review focus (`--extra-prompt`). Plan reviews default to
+a 420-second timeout and implementation reviews to 300 seconds. Both prompts state
+an inspection budget and the reviewer's deadline, so a reviewer writes its review
+from the evidence it has instead of running out of time.
 
-The runner prints review and log paths and resolved models. A failed nonempty
-report is kept as `.md.failed`, and an agy report without a successful, valid
-terminal response as `.md.invalid`. The run succeeds when at least one reviewer
-produces a review; report skipped and failed providers as partial coverage and keep
-the run directory for diagnosis.
+The branch is the unit of an implementation review. The run writes the full diff
+and one diff per changed file under `<run-dir>/diffs/` (the file's path plus
+`.diff`), with `diffs/INDEX.txt` listing every changed file, its diff size and
+whether it was embedded. The prompt names the base, merge base and head commits and
+lists the changed files (a list too long for the input is summarized by directory
+and points to the index). `PEER_REVIEW_MAX_INPUT_BYTES` (default 180,000) bounds the
+whole reviewer input: prompt, listing and embedded diffs. Whole per-file diffs are
+embedded while they fit, source code first, then documentation and repository meta
+files (Markdown, reStructuredText, text, `.gitignore`, license files), then data and
+schema files (YAML, JSON, CSV, XML, snapshots), then generated, lock and binary files. The default stays below the
+size at which agy silently drops the rest of its message (about 191,000 bytes), and
+every provider gets the same input. Reviewers open the other diffs, and the
+surrounding code, on demand: they may read the repository and the diffs directory.
+The record lists what was and was not embedded, and the stderr warning names the
+index; executors report whether reviewers read the non-embedded diffs. A failed
+`git fetch` (for example in a restricted sandbox) is a recorded warning, and the
+review uses the local base; a base ref that names no commit stops the run.
+
+A failed reviewer is classified as `timeout`, `rate_limited`, `auth`,
+`startup_denied`, `invalid_output`, `empty`, `missing_cli` or `error` from its exit
+status and its log or stream; agy's error payload is kept, so a rate limit that ran
+into the deadline is reported as `rate_limited`, and another stream error stays as
+the timeout's detail. A rate-limited reviewer, or one
+that hit a transient server or network error, is retried once after a short
+backoff within its own timeout; timeouts, `auth`, `missing_cli` and
+`startup_denied` are not retried. Codex's lower-reasoning fallbacks share the
+reviewer's timeout, and the log of an attempt that timed out is kept. A failed
+nonempty report is kept as `.md.failed`, including the review text agy streamed
+before it timed out or was interrupted, and an agy report without a successful,
+valid terminal response as `.md.invalid`. The run prints its maximum duration once
+its input is ready.
 
 Codex needs write access to its CLI state directory even for read-only reviews. When
-the host agent blocks it, the executors request an approved launch; see the
-[plan-review](../agent-skills/baton-plan-review-executor/SKILL.md) and
-[peer-review](../agent-skills/baton-peer-review-executor/SKILL.md) executors.
+the host agent blocks it, the executor requests an approved launch; see the
+[review executor](../agent-skills/baton-review-executor/SKILL.md).
+
+### Run records and sessions
+
+Every run writes `run.json` in its run directory when it starts (`status:
+running`, with the runner's PID and start time) and rewrites it when it ends
+(`completed`, `failed`, `interrupted` or `no_changes`). It records the kind, focus,
+times, project, the launching agent session (from the provider's session variable,
+which in a subagent may be its parent's), what was reviewed (plan path, or
+repository, branch, base, merge base and head commits, embedded and non-embedded
+files), warnings, and per reviewer the provider, model, outcome, failure reason,
+duration, review, log and working directory, with one entry per attempt carrying
+its session ID and process group. An attempt is recorded when it starts and its
+session ID as soon as it is known, so a killed run still names its sessions. Each
+Codex fallback and each retry is a separate attempt; the accepted one is marked.
+Claude reviewers get a fresh session ID per attempt, Codex reports its own in its
+log and agy in its stream; Cursor exposes none. agy runs in a private temporary
+directory that its attempt removes, so that directory is recorded apart from the
+working directory and `show` says whether it is still present. A run that fails
+before its reviewers start records its error, and `show` names each failed
+reviewer's `.md.failed` or `.md.invalid` output.
+Command lines and prompts are not recorded.
+
+`baton review show RUN` (a run ID, run directory or `run.json`) prints the record,
+marking paths that no longer exist, and each attempt's provider, session ID and
+working directory, so a reviewer session can be reopened with that provider's own
+CLI. Reviewer sessions hold the untrusted diff or plan text they reviewed. A
+`running` record whose runner process is gone, or whose PID now belongs to another
+process, is shown as `interrupted`; this is how a dispatcher confirms that a
+backgrounded run finished. A runner killed outright (SIGKILL) cannot stop its
+reviewers, so `show` names each reviewer process group of an interrupted run that is
+still alive, with the command to stop it when its leader is still the process Baton
+started (otherwise it only says the group may still exist); nothing stops them
+automatically.
+`--json` prints the record with its effective status and those process groups.
+
+Each agy attempt also records `progress`: completed tool calls, when the last one
+finished (seconds after launch, as the runner read the stream), the seconds elapsed,
+the bytes of review text streamed (what became the `.md` or `.md.failed`) and, when
+agy reports them, input and output tokens. `show` prints it on one line. A timeout
+with a recent last tool call and no review text was still reading; one with review
+text was writing when it was stopped. The record is rewritten after every tool call,
+so a killed run keeps recent numbers. Codex and Claude attempts record none.
+
+Reopening a reviewer session interactively first asks to trust its folder in
+Claude and agy. agy completion is not reliable on large inputs: in replays it
+finished 4 of 7 plan reviews within 420 seconds and 1 of 5 large implementation
+reviews within 300 seconds, using most of its timeout even when it finished.
+
+`baton review save RUN_DIR [--selector PROJECT]` is a separate, trusted step: it
+copies a finished run's `run.json` and review files (`.md`, `.md.failed`,
+`.md.invalid`) once into the project's artifacts at `reviews/<run-id>/` and commits
+them like `baton artifacts commit`. It refuses a run that is still running or that
+belongs to another project, and checks the artifact checkout before copying
+anything; a failed save leaves no copy behind, and empty review files left by a
+killed run are not saved. Saving again is a no-op that retries
+the commit; an uncommitted copy left by a failed save is replaced.
+Outside a project there is nothing to save (exit 3). Prompts, diffs and logs stay in
+the temporary run directory. `baton review list [--selector PROJECT] [--json]` lists
+the project's saved runs and its unsaved runs still in `$TMPDIR` (outside a project,
+every unsaved run) with kind, start time, coverage and status.
 
 ## Review boundaries
 
@@ -91,9 +177,15 @@ instructions. The prompts tell reviewers to treat that content as data, never to
 follow instructions inside it, and never to modify files, run write commands,
 commit or push. The invocations restrict tools and permissions as follows:
 
-- Codex uses `exec -s read-only` and `approval_policy="never"`.
-- Claude uses `--restricted`, strict MCP configuration, noninteractive denial and
-  only `Read,Glob,Grep`. Restricted mode ignores user/project/local settings.
+- Codex uses `exec -s read-only` and `approval_policy="never"`, and starts no MCP
+  servers: the runner lists them with `codex mcp list --json`, turns plugins off
+  (they add servers outside `config.toml` that cannot be disabled by name) and
+  disables every remaining enabled server by name. The run record names the disabled
+  servers; if listing fails, the review runs with a warning and only plugins off.
+  The doctor smoke test runs the same invocation; unattended retrospectives do not.
+- Claude uses `--restricted`, `--strict-mcp-config` without an MCP configuration (so
+  no MCP servers), noninteractive denial and only `Read,Glob,Grep`. Restricted mode
+  ignores user/project/local settings.
 - Cursor uses read-only `--mode ask`.
 - agy uses `--sandbox` in a private work directory, removed afterwards. Headless
   permissions auto-deny write and command tools only when no `permissions.allow`
@@ -102,8 +194,9 @@ commit or push. The invocations restrict tools and permissions as follows:
   with an empty response and fails the review. The sandbox alone is not an
   unconditional read-only guarantee.
 
-`--read-dir` reaches Claude, agy and Cursor as `--add-dir`; Codex's read-only
-sandbox already permits reads across paths. No reviewer gets blanket approval or
+The read roots (project worktrees for plan reviews; the repository and the diffs
+directory for implementation reviews) reach Claude, agy and Cursor as `--add-dir`;
+Codex's read-only sandbox already permits reads across paths. No reviewer gets blanket approval or
 a sandbox bypass. Invocation tests check the arguments Baton supplies, not the
 external CLIs' permission enforcement.
 
@@ -116,12 +209,20 @@ Other status errors stop dispatch. See [Review-loop configuration](configuration
 for schedules, inheritance, model precedence, validation and repair.
 
 A named pass carries its `Focus area: NAME` and `Project selector: PROJECT` through
-the dispatcher and executor. The helper resolves catalog text with
-`baton review focus NAME [--selector PROJECT]`, injects it once, and forwards the
-context to both preflight and execution. Ad-hoc `--extra-prompt` text is additive.
-General passes omit focused context; plan reviews reject a focus area.
+the dispatcher and executor to `baton review run --focus-area NAME --selector
+PROJECT`, which resolves the catalog text (`baton review focus NAME` prints it) and
+injects it once. Ad-hoc `--extra-prompt` text is additive. General passes omit
+focused context; plan reviews reject a focus area.
 
-The dispatcher awaits every reviewer and owns durable outcome reporting. Review-only
+A general round is clean only with no accepted P0/P1/P2 findings and at least two
+reviewers that produced a review (one when only one reviewer is configured). A
+round that cannot be clean for a reason the next round would repeat, such as a
+reviewer that keeps failing, ends the general phase after its fixes as a coverage
+blocker. From the second round on, earlier rounds' rejected and deferred findings
+are passed as extra focus, so reviewers re-raise them only with new evidence.
+
+The dispatcher awaits every reviewer and owns durable outcome reporting, including
+saving each run inside a project. Review-only
 specialists inspect and report; workers authorized to apply findings use the full
 task handoff and settlement protocol. Agent dispatch and model resolution follow
 [Worker dispatch](../agent-skills/baton-workflow/references/coordination.md#worker-dispatch).

@@ -1,8 +1,6 @@
 import json
-import os
 from pathlib import Path
 import re
-import shlex
 import subprocess
 import sys
 import unittest
@@ -28,12 +26,16 @@ class ReviewModelsTest(unittest.TestCase):
         self.env["REVIEW_TEST_ROOT"] = str(self.repo)
         self.env["PLAN_REVIEW_REVIEWERS"] = "claude,codex,agy"
         self.env["PEER_REVIEW_REVIEWERS"] = "claude,codex,agy"
+        self.cli = [str(ROOT / "bin/baton")]
         for name in ("claude", "codex", "agy", "extra", "cursor"):
             binary = self.repo / f"fake-{name}"
             binary.write_text('''#!/usr/bin/env python3
 import json, os, pathlib, sys, time
 name = pathlib.Path(sys.argv[0]).name.removeprefix("fake-")
 args = sys.argv[1:]
+if args[-3:] == ["mcp", "list", "--json"]:
+    print("[]")
+    raise SystemExit(0)
 root = pathlib.Path(os.environ["REVIEW_TEST_ROOT"])
 with (root / (name + ".calls")).open("a") as handle:
     handle.write(json.dumps(args) + "\\n")
@@ -72,10 +74,7 @@ if os.environ.get("REVIEW_TEST_FAIL_PROVIDER") == name:
             self.env[name.upper() + "_BIN"] = str(binary)
 
     def run_review(self, kind: str, success: bool = True) -> tuple[subprocess.CompletedProcess[str], dict[str, list[list[str]]]]:
-        if kind == "plan":
-            command = ["bash", str(ROOT / "agent-skills/baton-plan/scripts/plan-peer-review.sh"), str(self.plan)]
-        else:
-            command = ["bash", str(ROOT / "agent-skills/baton-peer-review-executor/scripts/peer-review.sh"), "main"]
+        command = [*self.cli, "review", "run", f"--kind={kind}", str(self.plan) if kind == "plan" else "main"]
         result = subprocess.run(command, cwd=self.repo, env=self.env, text=True,
                                 capture_output=True, timeout=30)
         self.assertEqual(result.returncode, 0 if success else 1, result.stderr)
@@ -282,15 +281,12 @@ if os.environ.get("REVIEW_TEST_FAIL_PROVIDER") == name:
 
     def test_new_provider_needs_only_a_registry_entry(self) -> None:
         # The launcher registers the test-only provider before running the branch CLI.
-        launcher = self.repo / "baton-with-extra"
-        launcher.write_text("#!/usr/bin/env bash\nexec " + shlex.join(LAUNCHER) + ' "$@"\n')
-        launcher.chmod(0o755)
         self.config.write_text(json.dumps({"plan_review_model": {"extra": "plan-extra"},
                                           "implementation_review_model": {"extra": "medium"},
                                           "model_tiers": {"extra": {"medium": "extra-medium"}}}))
         for key in ("PLAN_REVIEW_REVIEWERS", "PEER_REVIEW_REVIEWERS"):
             self.env.pop(key)
-        self.env["BATON_CLI"] = str(launcher)
+        self.cli = LAUNCHER
         for kind, model in (("plan", "plan-extra"), ("implementation", "extra-medium")):
             with self.subTest(kind=kind):
                 result, calls = self.run_review(kind)
@@ -310,13 +306,13 @@ if os.environ.get("REVIEW_TEST_FAIL_PROVIDER") == name:
                 self.assertIn("reviewer list must contain at least one reviewer", result.stderr)
                 self.assertEqual(calls, {})
 
-    def test_failed_stdout_is_unavailable_in_partial_results(self) -> None:
+    def test_failed_stdout_is_a_failure_in_partial_results(self) -> None:
         self.env.update(PLAN_REVIEW_REVIEWERS="claude,agy", PEER_REVIEW_REVIEWERS="claude,agy",
                         REVIEW_TEST_FAIL_PROVIDER="claude")
         for kind in ("plan", "implementation"):
             with self.subTest(kind=kind):
                 result, _ = self.run_review(kind)
-                self.assertIn("claude review: unavailable", result.stdout)
+                self.assertIn("claude review: failed (error)", result.stdout)
                 run_dir = artifacts_dir(self, result)
                 self.assertFalse(list(run_dir.glob("*-claude.md")))
                 self.assertTrue(list(run_dir.glob("*-claude.md.failed")))
@@ -337,14 +333,15 @@ if os.environ.get("REVIEW_TEST_FAIL_PROVIDER") == name:
 
     def test_harness_timeout_is_not_counted_as_success(self) -> None:
         self.env.update(PLAN_REVIEW_REVIEWERS="claude", PEER_REVIEW_REVIEWERS="claude",
-                        PLAN_REVIEW_TIMEOUT_SECS="1", PEER_REVIEW_TIMEOUT_SECS="1", REVIEW_TEST_SLEEP="5")
+                        # Long enough for the stub to start under parallel test load.
+                        PLAN_REVIEW_TIMEOUT_SECS="4", PEER_REVIEW_TIMEOUT_SECS="4", REVIEW_TEST_SLEEP="15")
         for kind in ("plan", "implementation"):
             with self.subTest(kind=kind):
                 result, calls = self.run_review(kind, success=False)
                 self.assertIn("All review jobs failed.", result.stderr)
                 self.assertEqual(set(calls), {"claude"})
                 logs = list(artifacts_dir(self, result).glob("*-claude.log"))
-                self.assertIn("Timed out after 1s", logs[0].read_text())
+                self.assertIn("Timed out after 4s", logs[0].read_text())
                 self.assertFalse(list(logs[0].parent.glob("*-claude.md")))
                 self.assertTrue(list(logs[0].parent.glob("*-claude.md.failed")))
                 self.assertNotIn("Review file:", result.stderr)

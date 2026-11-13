@@ -134,9 +134,10 @@ model use their CLI default. Reviewers run in registry order.
 `<PROVIDER>_BIN` overrides executables.
 `PLAN_REVIEW_TIMEOUT_SECS` / `PEER_REVIEW_TIMEOUT_SECS` override the timeout for
 every reviewer, and `PLAN_REVIEW_<PROVIDER>_TIMEOUT_SECS` /
-`PEER_REVIEW_<PROVIDER>_TIMEOUT_SECS` override it for one provider. The review
-helpers' `--help` lists Codex reasoning controls and other invocation options; see
-[Review runners](skills.md#review-runners). Reviewer safety is described in
+`PEER_REVIEW_<PROVIDER>_TIMEOUT_SECS` override it for one provider; `--reviewers
+CSV` on `baton review run` overrides the reviewer set like the variables. `baton
+review run --help` lists Codex reasoning controls and other invocation options; see
+[Review runs](skills.md#review-runs). Reviewer safety is described in
 [Review boundaries](skills.md#review-boundaries).
 
 ## Review loop
@@ -317,7 +318,8 @@ arguments.
 Cursor is opt-in for reviews and worker-model defaults only; Cursor sessions can
 always own projects. Installation and `baton config init` do not add it to the
 model maps or default reviewer set. Select it for one run with
-`PLAN_REVIEW_REVIEWERS=cursor` or `PEER_REVIEW_REVIEWERS=cursor`; an absent model
+`PLAN_REVIEW_REVIEWERS=cursor` or `PEER_REVIEW_REVIEWERS=cursor` (or `baton review
+run --reviewers cursor`); an absent model
 setting uses the CLI default. Saving a Cursor model with
 `--plan-review-model cursor=MODEL_ID` or `--implementation-review-model
 cursor=MODEL_ID` adds it to that workflow's default reviewer set.

@@ -33,11 +33,9 @@ packages = ["baton"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "blackboard.py" = "blackboard.py"
-"agent-skills/review-runner-lib.sh" = "baton/skills/review-runner-lib.sh"
 "agent-skills/baton-plan" = "baton/skills/baton-plan"
-"agent-skills/baton-plan-review-executor" = "baton/skills/baton-plan-review-executor"
 "agent-skills/baton-peer-review" = "baton/skills/baton-peer-review"
-"agent-skills/baton-peer-review-executor" = "baton/skills/baton-peer-review-executor"
+"agent-skills/baton-review-executor" = "baton/skills/baton-review-executor"
 "agent-skills/baton-review-loop" = "baton/skills/baton-review-loop"
 "agent-skills/baton-retro" = "baton/skills/baton-retro"
 

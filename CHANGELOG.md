@@ -4,6 +4,36 @@
 
 Initial public release.
 
+- Reviews run on one runner and one executor. `baton review run --kind
+  plan|implementation` replaces the `plan-peer-review.sh` and `peer-review.sh`
+  scripts, and the `baton-review-executor` skill replaces
+  `baton-plan-review-executor` and `baton-peer-review-executor` (`baton skills
+  install` removes their managed links); `baton-peer-review` dispatches plan
+  reviews too. Every run writes a `run.json` record with each reviewer's outcome,
+  failure reason and per-attempt session IDs; `baton review show` and `list` find
+  and inspect runs (a run whose runner died shows as `interrupted`), and the
+  trusted `baton review save` copies a finished run into the project's artifacts.
+  Implementation reviews embed whole per-file diffs while the whole input fits
+  `PEER_REVIEW_MAX_INPUT_BYTES` (default 180,000; it replaces
+  `PEER_REVIEW_MAX_DIFF_BYTES`) and let reviewers read the rest, listed in
+  `diffs/INDEX.txt`, and the repository on demand, instead of cutting the diff;
+  prompts state an inspection budget and deadline; rate limits and transient errors
+  are retried once within the reviewer's timeout; failures are classified rather
+  than reported as `unavailable`; Codex fallbacks share one deadline and keep the
+  timed-out attempt's log; a failed `git fetch` is a warning. The review loop needs
+  two successful reviewers for a clean general round, ends on persistent reviewer
+  failures as a coverage blocker, and passes earlier rejected findings to later
+  rounds.
+
+- Codex reviewers start no MCP servers: reviews turn Codex plugins off and disable
+  every MCP server `codex mcp list` reports as enabled, and record which ones in the
+  run record. Claude reviewers already load none (`--strict-mcp-config`).
+
+- agy review attempts record their progress (tool calls, time of the last one,
+  elapsed time, review text streamed, token totals) in the run record, and
+  `baton review show` prints it, so a timeout while writing can be told from one
+  while still reading.
+
 - `baton config set` removes model entries and tier mappings with repeatable
   `--remove-plan-review-model`, `--remove-implementation-review-model`,
   `--remove-worker-model` (each `PROVIDER`) and `--remove-model-tier
