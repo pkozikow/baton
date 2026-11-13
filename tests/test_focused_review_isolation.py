@@ -74,15 +74,13 @@ class FocusedReviewIsolationTest(unittest.TestCase):
         fake.chmod(0o755)
         scratch = self.root / "review-artifacts"
         scratch.mkdir()
-        self.env.update(BATON_CLI=str(fixtures.SCRIPT), CODEX_BIN=str(fake),
-                        CODEX_HOME=str(scratch), REVIEW_TEST_ROOT=str(scratch),
-                        TMPDIR=str(scratch), PEER_REVIEW_SKIP_FETCH="1")
-        script = fixtures.SCRIPT.parent.parent / "agent-skills/baton-peer-review-executor/scripts/peer-review.sh"
+        self.env.update(CODEX_BIN=str(fake), CODEX_HOME=str(scratch), REVIEW_TEST_ROOT=str(scratch),
+                        TMPDIR=str(scratch), PEER_REVIEW_SKIP_FETCH="1", PEER_REVIEW_REVIEWERS="codex")
         saved = config.read_bytes()
         for project, expected in (("example", "project-security"), ("second", "global-security")):
             with self.subTest(project=project):
-                result = self.run_command(["bash", str(script), "--focus-area", "security",
-                                           "--selector", project, "main"], worktree)
+                result = self.run_command(["bash", str(fixtures.SCRIPT), "review", "run", "--kind=implementation",
+                                           "--focus-area", "security", "--selector", project, "main"], worktree)
                 self.assertIn("Focus area: security", result.stdout)
                 calls = [json.loads(line) for line in (scratch / "codex.calls").read_text().splitlines()]
                 args = calls[-1]["args"]

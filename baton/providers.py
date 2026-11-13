@@ -42,18 +42,23 @@ Contract for a provider (enforced by tests/test_providers.py):
   diffs and plans, so every review invocation must be read-only (a read-only
   sandbox, permission mode or tool allow-list) and never use blanket approval or
   sandbox bypass flags. ``read_dir_flag`` passes ``request.read_dirs`` (the
-  project repositories a plan reviewer may inspect) as ``<flag> DIR`` pairs before
+  directories a reviewer may read: project repositories and per-file diffs) as ``<flag> DIR`` pairs before
   the prompt separator; providers whose read-only mode already reads any path
   leave it ``None``. agy's added directories rely on headless permissions: it
   auto-denies write and command tools that no ``permissions.allow`` rule in the
   user's agy settings grants, and a denied call ends the run with an empty
   response, which fails the review.
+- Every review attempt appends an entry to ``request.attempts`` with the reviewer
+  session ID when the CLI exposes one (``review_session`` pre-assigns it; Codex and
+  agy report it in their log or stream), and a failed review sets
+  ``request.failure`` to one of ``FAILURE_REASONS``.
 """
 
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -64,6 +69,7 @@ import sys
 import threading
 import time
 from typing import IO, Any, ClassVar, TextIO
+import uuid
 
 from .errors import ProjectError
 
@@ -161,6 +167,45 @@ def slugify(value: str) -> str:
     return re.sub(r"-+", "-", re.sub(r"[^A-Za-z0-9._-]", "-", re.sub(r"[/\s]", "-", value)))
 
 
+FAILURE_REASONS = ("timeout", "rate_limited", "auth", "startup_denied", "invalid_output", "empty", "missing_cli",
+                   "error")
+_AUTH = re.compile(r"\b401\b|unauthori[sz]ed|not (logged|signed) in|please (run|use) \S*\s*/?login|"
+                   r"authenticat|invalid (x-)?api[ _-]?key|expired (token|credentials)|token (has )?expired|"
+                   r"credentials? (are |is )?(missing|invalid|expired)", re.IGNORECASE)
+_RATE_LIMITED = re.compile(r"\b429\b|rate[ _-]?limit|too many requests|resource[ _]exhausted|quota|usage limit|"
+                           r"overloaded|\b529\b", re.IGNORECASE)
+_TRANSIENT = re.compile(r"\b50[0234]\b|service unavailable|bad gateway|gateway time-?out|internal server error|"
+                        r"connection (reset|refused|closed|error)|econnreset|stream (error|disconnected)|"
+                        r"network error|temporarily unavailable", re.IGNORECASE)
+
+
+def classify_failure(status: int, lines: list[str]) -> tuple[str, str | None, bool]:
+    """Classifies a failed review from its exit status and error lines: ``(reason, detail, retryable)``.
+
+    A rate limit that ran into the deadline is reported as ``rate_limited``: it is the root cause.
+    Only rate limits and transient server or network errors are retryable.
+    """
+    for pattern, reason in ((_AUTH, "auth"), (_RATE_LIMITED, "rate_limited"), (_TRANSIENT, "error")):
+        if status == 124 and reason != "rate_limited":
+            continue
+        matched = next((line.strip() for line in reversed(lines) if pattern.search(line)), None)
+        if matched is not None:
+            return reason, matched[:300], reason != "auth"
+    if status == 124:
+        return "timeout", None, False
+    detail = next((line.strip() for line in reversed(lines) if line.strip()), None)
+    return "error", detail[:300] if detail else None, False
+
+
+def _tail_lines(path: Path, limit: int = 65536) -> list[str]:
+    try:
+        with path.open("rb") as handle:
+            handle.seek(max(0, path.stat().st_size - limit))
+            return handle.read().decode("utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+
+
 @dataclass
 class ReviewRequest:
     """One reviewer run. ``input`` is the raw reviewed text; ``combined_input`` holds the prompt plus input."""
@@ -184,9 +229,23 @@ class ReviewRequest:
     cwd: Path | None = None
     messages: TextIO | None = None
     processes: ProcessGroups | None = None
+    # One entry per launched CLI: session_id, log, cwd and status, plus provider details such as reasoning.
+    attempts: list[dict[str, Any]] = field(default_factory=list)
+    failure: str | None = None
+    failure_detail: str | None = None
+    retryable: bool = False
 
     def remaining(self) -> float:
         return self.timeout if self.deadline is None else max(0.0, self.deadline - time.monotonic())
+
+    def fail(self, reason: str, detail: str | None = None, retryable: bool = False) -> None:
+        """Records the first failure reason of this review; later, less specific failures do not replace it."""
+        if self.failure is None:
+            self.failure, self.failure_detail, self.retryable = reason, detail, retryable
+
+    def attempt(self, session_id: str | None, log: Path, cwd: Path | None, status: int, **details: Any) -> None:
+        self.attempts.append({"session_id": session_id, "log": str(log.absolute()),
+                              "cwd": str((cwd or self.cwd or Path.cwd()).absolute()), "status": status, **details})
 
     def say(self, text: str) -> None:
         stream = self.messages or sys.stderr
@@ -268,8 +327,18 @@ class Provider:
             return []
         return [value for directory in request.read_dirs for value in (self.read_dir_flag, str(directory))]
 
+    def review_session(self) -> tuple[list[str], str | None]:
+        """Arguments that pre-assign a reviewer session, and its ID; ``([], None)`` when the CLI reports its own."""
+        return [], None
+
+    def error_lines(self, request: ReviewRequest) -> list[str]:
+        """Lines of the last attempt's diagnostics that may explain a failure (never the echoed prompt)."""
+        return _tail_lines(request.log)
+
     def review(self, request: ReviewRequest) -> int:
         """Runs one reviewer and returns its exit status; non-zero means no usable review at ``request.output``."""
+        request.failure = request.failure_detail = None
+        request.retryable = False
         status = self.run_review(request)
         output = request.output
         if status == 0 and self.validates_review and request.validator is not None and _nonempty(output):
@@ -279,16 +348,21 @@ class Provider:
                 output.replace(invalid)
                 request.say(f"Error: {self.name} output is not {problem}.")
                 request.say(f"Raw {self.name} output preserved at: {invalid}")
+                request.fail("invalid_output", problem)
                 status = 1
         if status == 0 and not _nonempty(output):
             request.say(f"Error: {self.name} produced empty output.")
+            request.fail("empty")
             status = 1
+        if status != 0 and request.failure is None:
+            request.fail(*classify_failure(status, self.error_lines(request)))
         if status != 0 and _nonempty(output):
             output.replace(output.with_name(output.name + ".failed"))
         return status
 
     def run_review(self, request: ReviewRequest) -> int:
-        command = [request.executable, *self.args]
+        session_args, session_id = self.review_session()
+        command = [request.executable, *self.args, *session_args]
         if request.model != "default":
             command += [self.model_flag, request.model]
         command += self.read_dir_args(request)
@@ -299,7 +373,9 @@ class Provider:
         else:
             command.append(request.prompt)
         with request.output.open("wb") as output, request.log.open("wb") as log:
-            return run_reviewer_command(command, request, stdin=stdin, stdout=output, stderr=log)
+            status = run_reviewer_command(command, request, stdin=stdin, stdout=output, stderr=log)
+        request.attempt(session_id, request.log, None, status)
+        return status
 
 
 def run_reviewer_command(command: list[str], request: ReviewRequest, *, stdin: Path | None,
@@ -332,7 +408,7 @@ def run_reviewer_command(command: list[str], request: ReviewRequest, *, stdin: P
                 # the group ID allocated, so this cannot hit a reused process group.
                 _kill_group(process.pid, signal.SIGKILL)
                 process.wait()
-                stderr.write(f"Timed out after {_seconds(timeout)}s: {' '.join(command)}\n".encode())
+                stderr.write(f"Timed out after {_seconds(math.ceil(timeout))}s: {' '.join(command)}\n".encode())
                 stderr.flush()
                 return 124
         finally:
@@ -376,7 +452,7 @@ def _wait_for_review_completion(process: subprocess.Popen[bytes], processes: Pro
     if processes.closed:
         return 124
     if timed_out:
-        stderr.write(f"Timed out after {_seconds(timeout)}s: {' '.join(command)}\n".encode())
+        stderr.write(f"Timed out after {_seconds(math.ceil(timeout))}s: {' '.join(command)}\n".encode())
         return 124
     if forced and status == -signal.SIGKILL:
         stderr.write(b"AGY review completed; killed lingering CLI process group after shutdown grace.\n")
@@ -421,6 +497,10 @@ class CodexProvider(Provider):
     def review_output(self, prefix: str, model: str) -> Path:
         return Path(f"{prefix}-{self.name}-{slugify(model)}.md")
 
+    def error_lines(self, request: ReviewRequest) -> list[str]:
+        # The log echoes the prompt and the reviewed text after "user", so only Codex's own error lines count.
+        return [line for line in _tail_lines(request.log) if re.match(r"(?:ERROR|Error|error)\b", line)]
+
     def run_review(self, request: ReviewRequest) -> int:
         reasoning = request.options.get("reasoning", "high")
         candidates = [reasoning]
@@ -429,12 +509,16 @@ class CodexProvider(Provider):
         model = [] if request.model == "default" else [self.model_flag, request.model]
         stem = str(request.log).removesuffix(".log")
         status, attempt_log = 1, None
+        if request.deadline is not None and request.remaining() <= 0:
+            request.say(f"Error: {self.name} timed out after {_seconds(request.timeout)}s.")
+            request.fail("timeout")
+            return 124
         for index, effort in enumerate(candidates):
+            # The reviewer's failure is the last attempt's.
+            request.failure = request.failure_detail = None
+            request.retryable = False
             attempt_log = Path(f"{stem}-{effort}.log")
             request.output.unlink(missing_ok=True)
-            if request.deadline is not None and request.remaining() <= 0:
-                request.say(f"Error: {self.name} timed out after {_seconds(request.timeout)}s.")
-                return 124
             # Reviewers read untrusted diffs and plans, so they get a read-only sandbox and an explicit
             # never policy: without one, exec inherits the user's sandbox and (possibly auto-reviewed) approvals.
             command = [request.executable, "exec", *model, "--config", f'model_reasoning_effort="{effort}"',
@@ -442,21 +526,25 @@ class CodexProvider(Provider):
                        "--output-last-message", str(request.output), "--color", "never", "-"]
             with attempt_log.open("wb") as log:
                 status = run_reviewer_command(command, request, stdin=request.combined_input, stdout=log, stderr=log)
+            diagnostics = attempt_log.read_text(errors="replace")
+            session = re.search(r"^session id:\s*(\S+)\s*$", diagnostics, re.MULTILINE)
+            request.attempt(session.group(1) if session else None, attempt_log, None, status, reasoning=effort)
+            # From here on the last attempt's log is the reviewer's log, whatever ends the loop.
+            shutil.copyfile(attempt_log, request.log)
             if _nonempty(request.output) and (status == 0 or not request.require_zero_exit):
-                shutil.copyfile(attempt_log, request.log)
                 Path(f"{stem}-reasoning.txt").write_text(effort + "\n")
                 if status != 0:
                     request.say(f"Warning: {self.name} exited with code {status} at reasoning={effort} but produced "
                                 "review output; accepting output.")
                 return 0
-            if request.require_zero_exit and status == 124:
-                shutil.copyfile(attempt_log, request.log)
+            if status == 124:
+                # One deadline covers every attempt, so a timed-out attempt leaves no time for a fallback.
+                request.fail("timeout")
                 return status
             if request.processes is not None and request.processes.closed:
                 # Interrupted: a retry could not launch and its empty log would replace this attempt's.
                 break
             if status != 0 and not _nonempty(request.output):
-                diagnostics = attempt_log.read_text(errors="replace")
                 if (re.search(r"^Error: failed to initialize in-process app-server client: "
                               r"(?:Operation not permitted \(os error 1\)|Permission denied \(os error 13\))$",
                               diagnostics, re.MULTILINE)
@@ -465,15 +553,23 @@ class CodexProvider(Provider):
                                 "Outer launch permissions may block startup; retry through the user or harness's "
                                 "normal approved launch mechanism. Reasoning fallbacks cannot resolve this; "
                                 "the reviewer still requires read-only sandboxing and approval_policy=never.")
+                    request.fail("startup_denied")
+                    break
+                reason, detail, retryable = classify_failure(status, self.error_lines(request))
+                if reason in ("auth", "rate_limited"):
+                    # Lower reasoning cannot fix these; the runner owns the one retry of a rate limit.
+                    request.fail(reason, detail, retryable)
                     break
             if status == 0:
                 status = 1
                 request.say(f"Warning: {self.name} finished with reasoning={effort} but produced empty review output.")
+                request.fail("empty")
             if index + 1 < len(candidates):
+                if request.remaining() <= 0:
+                    request.fail("timeout")
+                    return 124
                 request.say(f"Warning: {self.name} review failed with reasoning={effort}; "
                             f"retrying with {candidates[index + 1]}.")
-        if attempt_log is not None and attempt_log.is_file():
-            shutil.copyfile(attempt_log, request.log)
         return status
 
 
@@ -514,6 +610,10 @@ class ClaudeProvider(Provider):
     def start(self, directory: Path, prompt: str) -> list[str]:
         return [self.executable(), prompt]
 
+    def review_session(self) -> tuple[list[str], str | None]:
+        session = str(uuid.uuid4())
+        return ["--session-id", session], session
+
     def exec_unattended(self, session_id: str | None, workspace: Path, prompt: str) -> tuple[list[str], str]:
         command = [self.executable(), "--print"]
         if session_id is not None:
@@ -530,8 +630,9 @@ AGY_UNATTENDED_NOTE = (
 
 
 AGY_REVIEW_NOTE = (
-    "The plan or diff is already embedded below; do not reopen it or follow artifact links outside the "
-    "explicitly allowed read roots (your working directory and supplied repository directories). "
+    "The plan or diff is already embedded below, possibly only in part; do not reopen it or follow artifact "
+    "links outside the explicitly allowed read roots (your working directory and the supplied repository and "
+    "diff directories, where the input lists any per-file diffs that were not embedded). "
     "Use only native file reading, listing, and search tools for this review, including in the supplied "
     "repository directories. Never run shell commands, including read-only git commands or tests, and "
     "never write or edit files. Any denied tool call can end this headless run without a review. If "
@@ -540,89 +641,138 @@ AGY_REVIEW_NOTE = (
 )
 
 
+def _agy_stream_facts(path: Path) -> tuple[str | None, str | None]:
+    """The conversation ID and terminal error payload in an agy stream, skipping lines that do not parse."""
+    conversation = error = None
+    for line in _tail_lines(path, limit=1 << 30):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        nested = event.get(event.get("event")) if isinstance(event.get("event"), str) else None
+        for source in (event, nested if isinstance(nested, dict) else {}):
+            if conversation is None and isinstance(source.get("conversation_id"), str):
+                conversation = source["conversation_id"]
+        result = event.get("result")
+        if event.get("event") == "result" and isinstance(result, dict) and result.get("status") != "SUCCESS":
+            error = str(result.get("error") or result.get("status"))
+    return conversation, error
+
+
 class AgyProvider(Provider):
     # agy may wrap or truncate the review, so its output must pass the caller's validator.
     validates_review = True
+
+    @staticmethod
+    def stream_path(request: ReviewRequest) -> Path:
+        return Path(str(request.log.absolute()).removesuffix(".log") + "-stream.jsonl")
+
+    def error_lines(self, request: ReviewRequest) -> list[str]:
+        # A rate-limited agy keeps retrying until it is stopped, then reports the error in its terminal result.
+        error = _agy_stream_facts(self.stream_path(request))[1]
+        return _tail_lines(request.log) + ([error] if error else [])
 
     def run_review(self, request: ReviewRequest) -> int:
         # The sandbox may write its working directory, so keep it separate from other reviewers' artifacts.
         work = request.output.absolute().with_name(request.output.stem + ".work")
         shutil.rmtree(work, ignore_errors=True)
         work.mkdir()
+        launched = False
+        status = 1
         try:
-            stem = str(request.log.absolute()).removesuffix(".log")
-            stream_path = Path(stem + "-stream.jsonl")
-            with request.output.open("wb") as output, request.log.open("wb") as log, stream_path.open("wb") as stream:
-                try:
-                    content = request.combined_input.read_bytes().decode("utf-8")
-                except UnicodeError:
-                    log.write(b"Error: agy review input is not valid UTF-8.\n")
-                    return 1
-                message = {"event": "user", "message": {"content": AGY_REVIEW_NOTE + content}}
-                stdin = work / "stdin.jsonl"
-                stdin.write_text(json.dumps(message, ensure_ascii=False) + "\n", encoding="utf-8")
-                command = [request.executable, "--print-timeout", f"{_seconds(request.timeout)}s",
-                           "--log-file", stem + "-cli.log", "--input-format", "stream-json",
-                           "--output-format", "stream-json"]
-                if request.model != "default":
-                    command += [self.model_flag, request.model]
-                command += self.read_dir_args(request)
-                command.append("--sandbox")
-                result: dict[str, Any] | None = None
-                encoded: bytes | None = None
-                pending = b""
-                with stream_path.open("rb") as events:
-                    def observe(*, final: bool = False) -> bool:
-                        nonlocal result, encoded, pending
-                        pending += events.read()
-                        lines = pending.split(b"\n")
-                        pending = lines.pop()
-                        if final and pending:
-                            lines.append(pending)
-                            pending = b""
-                        for line in lines:
-                            if not line.strip():
-                                continue
-                            event = json.loads(line.decode("utf-8"))
-                            if not isinstance(event, dict):
-                                raise ValueError("expected a JSON event object")
-                            if result is not None:
-                                raise ValueError("unexpected event after terminal result")
-                            if event.get("event") != "result":
-                                continue
-                            result = event.get("result")
-                            if not isinstance(result, dict):
-                                raise ValueError("expected a terminal result object")
-                            if result.get("status") != "SUCCESS":
-                                raise ValueError("terminal result status is not SUCCESS")
-                            response = result.get("response")
-                            if not isinstance(response, str) or not response.strip():
-                                denied = result.get("denied_actions")
-                                if isinstance(denied, list) and denied:
-                                    actions = [{key: item[key] for key in ("action", "display_name")
-                                                if isinstance(item.get(key), str)}
-                                               for item in denied if isinstance(item, dict)]
-                                    raise ValueError("terminal result has no nonempty response; headless tool permission "
-                                                     "denial: denied_actions=" + json.dumps(actions))
-                                raise ValueError("terminal result has no nonempty response")
-                            encoded = response.encode("utf-8")
-                        return encoded is not None
-
-                    try:
-                        status = run_reviewer_command(command, request, stdin=stdin, stdout=stream, stderr=log,
-                                                      cwd=work, completed=observe)
-                        if status != 0:
-                            return status
-                        if not observe(final=True):
-                            raise ValueError("missing terminal result")
-                    except ValueError as error:
-                        log.write(f"Error: agy returned an invalid review stream: {error}\n".encode())
-                        return 1
-                assert encoded is not None
-                output.write(encoded)
-                return 0
+            status, launched = self._run_review(request, work)
+            return status
         finally:
             shutil.rmtree(work, ignore_errors=True)
+            if launched:
+                conversation = _agy_stream_facts(self.stream_path(request))[0]
+                request.attempt(conversation, request.log, work, status)
+
+    def _run_review(self, request: ReviewRequest, work: Path) -> tuple[int, bool]:
+        stem = str(request.log.absolute()).removesuffix(".log")
+        stream_path = self.stream_path(request)
+        with request.output.open("wb") as output, request.log.open("wb") as log, stream_path.open("wb") as stream:
+            try:
+                content = request.combined_input.read_bytes().decode("utf-8")
+            except UnicodeError:
+                log.write(b"Error: agy review input is not valid UTF-8.\n")
+                request.fail("error", "agy review input is not valid UTF-8")
+                return 1, False
+            message = {"event": "user", "message": {"content": AGY_REVIEW_NOTE + content}}
+            stdin = work / "stdin.jsonl"
+            stdin.write_text(json.dumps(message, ensure_ascii=False) + "\n", encoding="utf-8")
+            # Retries share the reviewer's deadline, so agy's own timeout is what remains of it.
+            command = [request.executable, "--print-timeout", f"{_seconds(math.ceil(request.remaining()))}s",
+                       "--log-file", stem + "-cli.log", "--input-format", "stream-json",
+                       "--output-format", "stream-json"]
+            if request.model != "default":
+                command += [self.model_flag, request.model]
+            command += self.read_dir_args(request)
+            command.append("--sandbox")
+            result: dict[str, Any] | None = None
+            encoded: bytes | None = None
+            pending = b""
+            failure = "invalid_output"
+            with stream_path.open("rb") as events:
+                def observe(*, final: bool = False) -> bool:
+                    nonlocal result, encoded, pending, failure
+                    pending += events.read()
+                    lines = pending.split(b"\n")
+                    pending = lines.pop()
+                    if final and pending:
+                        lines.append(pending)
+                        pending = b""
+                    for line in lines:
+                        if not line.strip():
+                            continue
+                        event = json.loads(line.decode("utf-8"))
+                        if not isinstance(event, dict):
+                            raise ValueError("expected a JSON event object")
+                        if result is not None:
+                            raise ValueError("unexpected event after terminal result")
+                        if event.get("event") != "result":
+                            continue
+                        result = event.get("result")
+                        if not isinstance(result, dict):
+                            raise ValueError("expected a terminal result object")
+                        if result.get("status") != "SUCCESS":
+                            # Keep the payload: it names the real cause, such as a rate limit.
+                            failure = "error"
+                            error = result.get("error")
+                            raise ValueError(f"terminal result status is not SUCCESS ({result.get('status')!r})"
+                                             + (f": {error}" if error else ""))
+                        response = result.get("response")
+                        if not isinstance(response, str) or not response.strip():
+                            failure = "empty"
+                            denied = result.get("denied_actions")
+                            if isinstance(denied, list) and denied:
+                                actions = [{key: item[key] for key in ("action", "display_name")
+                                            if isinstance(item.get(key), str)}
+                                           for item in denied if isinstance(item, dict)]
+                                raise ValueError("terminal result has no nonempty response; headless tool permission "
+                                                 "denial: denied_actions=" + json.dumps(actions))
+                            raise ValueError("terminal result has no nonempty response")
+                        encoded = response.encode("utf-8")
+                    return encoded is not None
+
+                try:
+                    status = run_reviewer_command(command, request, stdin=stdin, stdout=stream, stderr=log,
+                                                  cwd=work, completed=observe)
+                    if status != 0:
+                        return status, True
+                    if not observe(final=True):
+                        raise ValueError("missing terminal result")
+                except ValueError as error:
+                    log.write(f"Error: agy returned an invalid review stream: {error}\n".encode())
+                    log.flush()
+                    if failure != "error":
+                        request.fail(failure, str(error)[:300])
+                    return 1, True
+            assert encoded is not None
+            output.write(encoded)
+            return 0, True
 
     def resume(self, session_id: str, directory: Path) -> list[str]:
         return [self.executable(), "--conversation", session_id]
