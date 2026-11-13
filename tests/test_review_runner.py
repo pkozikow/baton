@@ -672,8 +672,11 @@ class PlanReviewGoldenTest(ReviewRunnerFixture):
             f"agy log: {run_dir / 'golden-plan-review-agy.log'}"])
         for name in ("codex", "claude", "agy"):
             self.assertTrue(any(line.startswith(f"Error: {name} review failed (") for line in lines), name)
+        prefix = run_dir / "golden-plan-review"
         self.assertEqual(result.stdout.splitlines(), [
             *self.preamble(run_dir), f"Plan file: {self.plan}",
+            *(line for name in ("codex", "claude", "agy")
+              for line in (f"{name} review: failed (error)", f"{name} log: {prefix}-{name}.log", f"{name} model: default")),
             "Coverage: 0 of 3 reviewers produced a review; failed: codex (error), claude (error), agy (error)",
             f"REVIEW_ARTIFACTS={run_dir}"])
         self.assertFalse([line for line in lines if line.startswith("Review file:")])
@@ -684,13 +687,17 @@ class PlanReviewGoldenTest(ReviewRunnerFixture):
         # seconds), well below the 60s it would sleep.
         self.env.update(STUB_CLAUDE="hang", PLAN_REVIEW_CLAUDE_TIMEOUT_SECS="5")
         started = time.monotonic()
-        result = self.plan_review(reviewers="claude,agy")
+        result = self.review("--kind=plan", "--reviewers=claude,agy", "--extra-prompt", "Watch for rate limit 429 handling",
+                             str(self.plan))
         self.assertLess(time.monotonic() - started, 10)
         run_dir = self.run_dir(result)
         log = (run_dir / "golden-plan-review-claude.log").read_text()
         self.assertIn(f"Timed out after 5s: {self.bins['claude']} {' '.join(CLAUDE_REVIEW_ARGS)} --session-id", log)
         self.assertFalse(alive(self.calls("claude")[0]["pid"]))
         self.assertIn("claude review: failed (timeout)", result.stdout.splitlines())
+        # The timeout note quotes the prompt, which mentions rate limits; that does not make it a rate limit.
+        self.assertIn("rate limit", log)
+        self.assertEqual(self.reviewer(result, "claude")["failure_detail"], None)
         # A timeout is not retried.
         self.assertEqual(len(self.calls("claude")), 1)
 
@@ -815,6 +822,11 @@ class FailureHandlingTest(ReviewRunnerFixture):
         self.assertEqual(names, {"a": "a.diff", "a.diff/b": "00002-a.diff-b.diff", "A.txt": "A.txt.diff",
                                  "a.txt": "00004-a.txt.diff", "dir/x": "dir/x.diff", "dir": "dir.diff",
                                  "../up": "00007-..-up.diff", "/abs": "00008--abs.diff"})
+        # A fallback name never takes a name already given out, and over-long components are shortened.
+        names = diff_file_names(["00003-a.diff-b", "a", "a.diff/b", "x" * 250])
+        self.assertEqual(names["a.diff/b"], "00007-a.diff-b.diff")
+        self.assertEqual(len(set(map(str.casefold, names.values()))), 4)
+        self.assertEqual(names["x" * 250], "00004-" + "x" * 150 + ".diff")
 
     def test_classification(self) -> None:
         cases = (
@@ -872,8 +884,8 @@ class PeerReviewGoldenTest(ReviewRunnerFixture):
         run_dir = self.run_dir(result)
         prefix = run_dir / "feature-review"
         self.assertEqual(result.stdout.splitlines(), [
-            *self.preamble(run_dir, 300),
-            "Branch: feature", "Base ref: main", f"Diff: {run_dir / 'feature.diff'}",
+            *self.preamble(run_dir, 300)[:2],
+            "Branch: feature", "Base ref: main", f"Diff: {run_dir / 'feature.diff'}", self.preamble(run_dir, 300)[2],
             f"codex review: {prefix}-codex-default.md", f"codex log: {prefix}-codex.log", "codex model: default",
             f"claude review: {prefix}-claude.md", f"claude log: {prefix}-claude.log", "claude model: default",
             "agy review: failed (invalid_output)", f"agy log: {prefix}-agy.log", "agy model: default",

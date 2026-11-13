@@ -82,6 +82,7 @@ PROMPT_ARGV = "argv"
 PROMPT_STDIN = "stdin"
 REVIEW_KILL_GRACE_SECS = 5
 REVIEW_SHUTDOWN_GRACE_SECS = 5
+TIMEOUT_NOTE = "Timed out after "
 
 
 class ProcessGroups:
@@ -195,6 +196,11 @@ def classify_failure(status: int, lines: list[str]) -> tuple[str, str | None, bo
         return "timeout", None, False
     detail = next((line.strip() for line in reversed(lines) if line.strip()), None)
     return "error", detail[:300] if detail else None, False
+
+
+def _diagnostic_lines(path: Path) -> list[str]:
+    # Baton's own timeout note quotes the command line, which can carry the prompt.
+    return [line for line in _tail_lines(path) if not line.startswith(TIMEOUT_NOTE)]
 
 
 def _tail_lines(path: Path, limit: int = 65536) -> list[str]:
@@ -333,7 +339,7 @@ class Provider:
 
     def error_lines(self, request: ReviewRequest) -> list[str]:
         """Lines of the last attempt's diagnostics that may explain a failure (never the echoed prompt)."""
-        return _tail_lines(request.log)
+        return _diagnostic_lines(request.log)
 
     def review(self, request: ReviewRequest) -> int:
         """Runs one reviewer and returns its exit status; non-zero means no usable review at ``request.output``."""
@@ -572,8 +578,8 @@ class CodexProvider(Provider):
                 request.fail("empty")
             if index + 1 < len(candidates):
                 if request.remaining() <= 0:
-                    request.fail("timeout")
-                    return 124
+                    # No time for a fallback: this attempt's own failure stands.
+                    break
                 request.say(f"Warning: {self.name} review failed with reasoning={effort}; "
                             f"retrying with {candidates[index + 1]}.")
         return status
@@ -683,7 +689,7 @@ class AgyProvider(Provider):
     def error_lines(self, request: ReviewRequest) -> list[str]:
         # A rate-limited agy keeps retrying until it is stopped, then reports the error in its terminal result.
         error = _agy_stream_facts(self.stream_path(request))[1]
-        return _tail_lines(request.log) + ([error] if error else [])
+        return _diagnostic_lines(request.log) + ([error] if error else [])
 
     def run_review(self, request: ReviewRequest) -> int:
         # The sandbox may write its working directory, so keep it separate from other reviewers' artifacts.

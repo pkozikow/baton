@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 from typing import Any
@@ -32,9 +33,13 @@ def temporary_root() -> Path:
 
 
 def process_start(pid: int) -> str | None:
-    """The process's start time as ``ps`` reports it, which tells a reused PID apart; None if it is gone."""
+    """The process's start time as ``ps`` reports it, which tells a reused PID apart; None if it is unknown.
+
+    The locale and time zone are pinned: the runner and a later ``show`` may run with different settings.
+    """
     try:
-        result = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=10)
+        result = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=10,
+                                env={**os.environ, "LC_ALL": "C", "TZ": "UTC"})
     except (OSError, subprocess.TimeoutExpired):
         return None
     return result.stdout.strip() or None
@@ -49,7 +54,11 @@ def process_alive(pid: Any, started: Any) -> bool:
         return False
     except PermissionError:
         pass
-    return not isinstance(started, str) or process_start(pid) == started
+    if not isinstance(started, str):
+        return True
+    # The PID exists; when ps cannot tell its start time, err on the side of a live run.
+    current = process_start(pid)
+    return current is None or current == started
 
 
 def effective_status(record: dict[str, Any]) -> str:
@@ -57,6 +66,19 @@ def effective_status(record: dict[str, Any]) -> str:
     if status == "running" and not process_alive(record.get("pid"), record.get("pid_start")):
         return "interrupted"
     return status
+
+
+def effective_record(path: Path) -> dict[str, Any]:
+    """The record with its effective status; a dead run's unfinished reviewers are reported as interrupted."""
+    record = read_record(path)
+    status = effective_status(record)
+    if status == "interrupted" and record.get("status") == "running":
+        # The runner may have finished between reading the record and checking its process.
+        record = read_record(path)
+        status = effective_status(record)
+    reviewers = [{**entry, "status": "interrupted"} if status == "interrupted" and entry.get("status") == "running"
+                 else entry for entry in record["reviewers"]]
+    return {**record, "status": status, "reviewers": reviewers}
 
 
 def write_record(run_dir: Path, record: dict[str, Any]) -> None:
@@ -106,11 +128,18 @@ def _records(directories: list[Path]) -> list[tuple[Path, dict[str, Any]]]:
     return found
 
 
+def _own_directory(path: Path) -> bool:
+    try:
+        details = path.lstat()
+    except OSError:
+        return False
+    return stat.S_ISDIR(details.st_mode) and details.st_uid == os.getuid()
+
+
 def _unsaved(project: dict[str, Any] | None) -> list[tuple[Path, dict[str, Any]]]:
     root = temporary_root()
     # Another local user can create directories in a shared temporary root; only the caller's own runs count.
-    directories = sorted(path for kind in RUN_DIRECTORY_KINDS for path in root.glob(f"{kind}.*")
-                         if not path.is_symlink() and path.is_dir() and path.stat().st_uid == os.getuid())
+    directories = sorted(path for kind in RUN_DIRECTORY_KINDS for path in root.glob(f"{kind}.*") if _own_directory(path))
     return [(directory, record) for directory, record in _records(directories)
             if project is None or (record.get("project") or {}).get("uuid") == project["uuid"]]
 
@@ -123,8 +152,8 @@ def _saved(saved_root: Path | None) -> list[tuple[Path, dict[str, Any]]]:
 
 def save(run_dir: Path, selector: str | None) -> int:
     from .doctor_freshness import require_trusted_runtime
-    record = read_record(run_dir / RECORD)
-    status = effective_status(record)
+    record = effective_record(run_dir / RECORD)
+    status = record["status"]
     if status == "running":
         raise ProjectError(f"Review run {record['id']} is still running (pid {record.get('pid')}); "
                            "save it after it finishes.")
@@ -142,7 +171,7 @@ def save(run_dir: Path, selector: str | None) -> int:
     destination = saved_root / record["id"]
     files = sorted(path for path in run_dir.iterdir()
                    if path.is_file() and not path.is_symlink() and path.name.endswith(REVIEW_SUFFIXES))
-    saved_record = {**record, "status": status}
+    saved_record = record
     if destination.exists():
         previous = read_record(destination / RECORD)
         if previous != saved_record or any(not (destination / path.name).is_file()
@@ -219,17 +248,18 @@ def _path(value: Any, saved_copy: Path | None = None) -> str:
 
 
 def show(run: str, selector: str | None, as_json: bool) -> int:
-    directory, record, saved = find_run(run, selector)
-    status = effective_status(record)
+    directory, recorded, saved = find_run(run, selector)
+    record = effective_record(directory / RECORD)
+    status = record["status"]
     if as_json:
-        print(json.dumps({**record, "status": status, "recorded_status": record.get("status"),
+        print(json.dumps({**record, "recorded_status": recorded.get("status"),
                           "record_path": str(directory / RECORD)}, indent=2))
         return 0
     copy = directory if saved else None
     kind = str(record.get("kind")) + (f", focus {record['focus']}" if record.get("focus") else "")
     print(f"Review run {record['id']} ({kind}): {status}"
-          + (f" (recorded as {record.get('status')}; runner pid {record.get('pid')} is gone)"
-             if status != record.get("status") else ""))
+          + (f" (recorded as {recorded.get('status')}; runner pid {record.get('pid')} is gone)"
+             if status != recorded.get("status") else ""))
     print(f"Record: {directory / RECORD}" + (" (saved)" if saved else ""))
     print(f"Started: {record.get('started')}; finished: {record.get('finished') or 'not yet'}")
     print(f"Run directory: {_path(record.get('run_dir'))}")
@@ -252,8 +282,6 @@ def show(run: str, selector: str | None, as_json: bool) -> int:
     print(f"Reviewers: {coverage(record)} produced a review")
     for reviewer in record["reviewers"]:
         outcome = reviewer.get("status")
-        if outcome == "running" and status == "interrupted":
-            outcome = "interrupted"
         if reviewer.get("failure"):
             outcome += f" ({reviewer['failure']}" + (f": {reviewer['failure_detail']}" if reviewer.get("failure_detail") else "") + ")"
         duration = reviewer.get("duration_seconds")

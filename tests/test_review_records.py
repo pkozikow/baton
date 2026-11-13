@@ -59,7 +59,9 @@ class RunStatusTest(ReviewRunnerFixture):
         output = self.show(str(run_dir)).stdout
         self.assertIn(f"Review run {record['id']} (plan): interrupted (recorded as running; runner pid "
                       f"{record['pid']} is gone)", output)
-        self.assertEqual(json.loads(self.show(record["id"], "--json").stdout)["status"], "interrupted")
+        shown = json.loads(self.show(record["id"], "--json").stdout)
+        self.assertEqual((shown["status"], shown["recorded_status"]), ("interrupted", "running"))
+        self.assertEqual([entry["status"] for entry in shown["reviewers"]], ["interrupted"])
         # The orphaned reviewer is not this test's concern beyond cleanup.
         os.killpg(self.calls("claude")[0]["pid"], signal.SIGKILL)
 

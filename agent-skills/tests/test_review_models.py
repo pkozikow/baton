@@ -330,14 +330,15 @@ if os.environ.get("REVIEW_TEST_FAIL_PROVIDER") == name:
 
     def test_harness_timeout_is_not_counted_as_success(self) -> None:
         self.env.update(PLAN_REVIEW_REVIEWERS="claude", PEER_REVIEW_REVIEWERS="claude",
-                        PLAN_REVIEW_TIMEOUT_SECS="1", PEER_REVIEW_TIMEOUT_SECS="1", REVIEW_TEST_SLEEP="5")
+                        # Long enough for the stub to start under parallel test load.
+                        PLAN_REVIEW_TIMEOUT_SECS="4", PEER_REVIEW_TIMEOUT_SECS="4", REVIEW_TEST_SLEEP="15")
         for kind in ("plan", "implementation"):
             with self.subTest(kind=kind):
                 result, calls = self.run_review(kind, success=False)
                 self.assertIn("All review jobs failed.", result.stderr)
                 self.assertEqual(set(calls), {"claude"})
                 logs = list(artifacts_dir(self, result).glob("*-claude.log"))
-                self.assertIn("Timed out after 1s", logs[0].read_text())
+                self.assertIn("Timed out after 4s", logs[0].read_text())
                 self.assertFalse(list(logs[0].parent.glob("*-claude.md")))
                 self.assertTrue(list(logs[0].parent.glob("*-claude.md.failed")))
                 self.assertNotIn("Review file:", result.stderr)

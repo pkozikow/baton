@@ -422,9 +422,15 @@ def diff_file_names(paths: list[str]) -> dict[str, str]:
         parts = Path(name).parts
         parents = {"/".join(parts[:end]).casefold() for end in range(1, len(parts))}
         if (Path(path).is_absolute() or any(part in ("", ".", "..") for part in Path(path).parts) or not parts
+                or any(len(part.encode()) > 200 for part in parts)
                 or name.casefold() in files | directories or parents & files):
-            name = f"{index + 1:05d}-{slugify(path)}.diff"
             parents = set()
+            suffix = index + 1
+            while True:
+                name = f"{suffix:05d}-{slugify(path)[-150:]}.diff"
+                if name.casefold() not in files | directories:
+                    break
+                suffix += len(paths)
         names[path] = name
         files.add(name.casefold())
         directories |= parents
@@ -653,14 +659,13 @@ def run(kind: str, reviewers: list[Reviewer], skipped: list[Skipped], review: Re
         print("All review jobs failed.", file=sys.stderr)
         for reviewer, (_status, final) in zip(reviewers, results):
             print(f"{reviewer.provider.name} log: {final.log}", file=sys.stderr)
-    else:
-        if failed:
-            print(f"Warning: partial review results. Failed reviewers: {' '.join(failed)}", file=sys.stderr, flush=True)
-        for reviewer, (status, final) in zip(reviewers, results):
-            name = reviewer.provider.name
-            print(f"{name} review: {final.output if status == 0 else f'failed ({final.failure or 'error'})'}")
-            print(f"{name} log: {final.log}")
-            print(f"{name} model: {reviewer.model}")
+    elif failed:
+        print(f"Warning: partial review results. Failed reviewers: {' '.join(failed)}", file=sys.stderr, flush=True)
+    for reviewer, (status, final) in zip(reviewers, results):
+        name = reviewer.provider.name
+        print(f"{name} review: {final.output if status == 0 else f'failed ({final.failure or 'error'})'}")
+        print(f"{name} log: {final.log}")
+        print(f"{name} model: {reviewer.model}")
     print(f"Coverage: {succeeded} of {len(reviewers) + len(skipped)} reviewers produced a review"
           + (f"; failed: {', '.join(failed)}" if failed else ""))
     return 0 if succeeded else 1
@@ -713,10 +718,11 @@ def run_command(args: argparse.Namespace) -> int:
         write_record(run_dir, record)
         print(f"Run: {record['id']}")
         print(f"Run record: {run_dir / review_records.RECORD}")
-        print(f"Maximum duration: {max_duration}s (the longest reviewer timeout plus {REVIEW_KILL_GRACE_SECS}s to stop "
-              "it; a retry shares its reviewer's timeout)", flush=True)
         if review.write is not None:
             review.write(run_dir, record)
+        # Printed once the input is ready (after any fetch), when the reviewers' deadlines start.
+        print(f"Maximum duration: {max_duration}s (the longest reviewer timeout plus {REVIEW_KILL_GRACE_SECS}s to stop "
+              "it; a retry shares its reviewer's timeout)", flush=True)
         for line in review.header:
             print(line)
         if review.input:
@@ -727,7 +733,7 @@ def run_command(args: argparse.Namespace) -> int:
     except ReviewError as error:
         print(f"Error: {error}", file=sys.stderr)
         record["status"] = "failed"
-    except SystemExit:
+    except (SystemExit, KeyboardInterrupt):
         record["status"] = "interrupted"
         raise
     except BaseException:
