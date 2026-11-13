@@ -135,7 +135,9 @@ CLI. Reviewer sessions hold the untrusted diff or plan text they reviewed. A
 process, is shown as `interrupted`; this is how a dispatcher confirms that a
 backgrounded run finished. A runner killed outright (SIGKILL) cannot stop its
 reviewers, so `show` names each reviewer process group of an interrupted run that is
-still alive, with the command to stop it; nothing stops them automatically.
+still alive, with the command to stop it when its leader is still the process Baton
+started (otherwise it only says the group may still exist); nothing stops them
+automatically.
 `--json` prints the record with its effective status and those process groups.
 
 Reopening a reviewer session interactively first asks to trust its folder in

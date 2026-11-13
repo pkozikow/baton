@@ -13,12 +13,12 @@ from pathlib import Path
 import re
 import shutil
 import stat
-import subprocess
 import sys
 from typing import Any
 
 from .errors import NoProject, ProjectError
 from .gitutil import git, write_json
+from .providers import process_start
 
 RECORD = "run.json"
 RUN_ID = re.compile(r"\d{8}T\d{6}Z-(plan|implementation)-[a-z0-9_]+")
@@ -30,19 +30,6 @@ SESSION_WARNING = ("Reviewer sessions hold the untrusted diff or plan text they 
 
 def temporary_root() -> Path:
     return Path(os.environ.get("TMPDIR") or "/tmp")
-
-
-def process_start(pid: int) -> str | None:
-    """The process's start time as ``ps`` reports it, which tells a reused PID apart; None if it is unknown.
-
-    The locale and time zone are pinned: the runner and a later ``show`` may run with different settings.
-    """
-    try:
-        result = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=10,
-                                env={**os.environ, "LC_ALL": "C", "TZ": "UTC"})
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    return result.stdout.strip() or None
 
 
 def process_alive(pid: Any, started: Any) -> bool:
@@ -178,9 +165,14 @@ def save(run_dir: Path, selector: str | None) -> int:
     destination = saved_root / record["id"]
     files = sorted(path for path in run_dir.iterdir()
                    if path.is_file() and not path.is_symlink() and path.name.endswith(REVIEW_SUFFIXES))
-    tracked = destination.is_dir() and bool(git(root, "--literal-pathspecs", "ls-files", "--",
-                                                 str(destination / RECORD), check=False))
-    if destination.exists() and not tracked:
+    def tracked() -> bool:
+        """Whether git holds the saved record, staged or committed."""
+        record_path = str(destination / RECORD)
+        return bool(git(root, "--literal-pathspecs", "ls-files", "--", record_path)
+                    or git(root, "--literal-pathspecs", "ls-tree", "--name-only", "HEAD", "--", record_path))
+
+    was_tracked = destination.is_dir() and tracked()
+    if destination.exists() and not was_tracked:
         # Left by an earlier save whose commit failed: copy it again rather than trust it.
         shutil.rmtree(destination)
     created = not destination.exists()
@@ -207,7 +199,8 @@ def save(run_dir: Path, selector: str | None) -> int:
         # Committing an already saved copy commits nothing but retries an earlier failed push.
         manager.commit_artifacts(project, f"Save {record.get('kind')} review run {record['id']}", paths)
     except BaseException:
-        if created:
+        # Only a copy git never took is removed; a staged or committed one stays for the retry to finish.
+        if created and not tracked():
             shutil.rmtree(destination, ignore_errors=True)
         raise
     print(f"Saved review run {record['id']} to {destination}")
@@ -270,8 +263,8 @@ def show(run: str, selector: str | None, as_json: bool) -> int:
     status = record["status"]
     if as_json:
         print(json.dumps({**record, "recorded_status": recorded.get("status"), "record_path": str(directory / RECORD),
-                          "live_process_groups": [{"provider": provider, "process_group": group}
-                                                  for provider, group in live_groups(record)]}, indent=2))
+                          "live_process_groups": [{"provider": provider, "process_group": group, "confirmed": confirmed}
+                                                  for provider, group, confirmed in live_groups(record)]}, indent=2))
         return 0
     copy = directory if saved else None
     kind = str(record.get("kind")) + (f", focus {record['focus']}" if record.get("focus") else "")
@@ -315,18 +308,24 @@ def show(run: str, selector: str | None, as_json: bool) -> int:
             ended = "unfinished" if attempt.get("status") is None else f"exit {attempt['status']}"
             print(f"    attempt {index}: {reviewer.get('provider')} session {attempt.get('session_id') or 'unknown'}, "
                   f"cwd {cwd}, {ended}{details}" + (" [accepted]" if attempt.get("accepted") else ""))
-    for provider, group in live_groups(record):
-        print(f"Warning: {provider} reviewer process group {group} is still running after its runner stopped; "
-              f"stop it with: kill -TERM -{group}")
+    for provider, group, confirmed in live_groups(record):
+        if confirmed:
+            print(f"Warning: {provider} reviewer process group {group} is still running after its runner stopped; "
+                  f"stop it with: kill -TERM -{group}")
+        else:
+            print(f"Warning: process group {group} of the {provider} reviewer may still exist, but its leader is not "
+                  f"the reviewer Baton started; check it with `pgrep -lg {group}` before stopping anything")
     if any(attempt.get("session_id") for reviewer in record["reviewers"] for attempt in reviewer.get("attempts") or []):
         print(SESSION_WARNING)
     return 0
 
 
-def live_groups(record: dict[str, Any]) -> list[tuple[str, int]]:
-    """Reviewer process groups of an interrupted run's unfinished attempts that still exist.
+def live_groups(record: dict[str, Any]) -> list[tuple[str, int, bool]]:
+    """Reviewer process groups of an interrupted run's unfinished attempts that may still exist.
 
-    The runner kills its reviewers when it is stopped by a signal, but not when it is killed outright.
+    The runner kills its reviewers when it is stopped by a signal, but not when it is killed outright. Each
+    entry is (provider, group, confirmed): confirmed when the group's leader is the process the runner started
+    (same start time); otherwise the group ID may have been reused or outlived its leader.
     """
     if record.get("status") != "interrupted":
         return []
@@ -334,12 +333,14 @@ def live_groups(record: dict[str, Any]) -> list[tuple[str, int]]:
     for reviewer in record["reviewers"]:
         for attempt in reviewer.get("attempts") or []:
             group = attempt.get("process_group")
-            if attempt.get("status") is None and type(group) is int and group > 0:
-                try:
-                    os.killpg(group, 0)
-                except ProcessLookupError:
-                    continue
-                except PermissionError:
-                    pass
-                groups.append((str(reviewer.get("provider")), group))
+            if attempt.get("status") is not None or type(group) is not int or group <= 0:
+                continue
+            try:
+                os.killpg(group, 0)
+            except (ProcessLookupError, PermissionError):
+                # Gone, or another user's group, which cannot be this run's reviewer.
+                continue
+            started = attempt.get("process_group_start")
+            confirmed = isinstance(started, str) and process_start(group) == started
+            groups.append((str(reviewer.get("provider")), group, confirmed))
     return groups

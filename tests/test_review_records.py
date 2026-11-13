@@ -8,7 +8,8 @@ import subprocess
 import time
 import unittest
 
-from baton.review_records import effective_status, process_start
+from baton.providers import process_start
+from baton.review_records import effective_status
 import test_project_manager as fixtures
 from test_review_runner import BATON, STUB, ReviewRunnerFixture
 
@@ -83,8 +84,19 @@ class RunStatusTest(ReviewRunnerFixture):
             shown = json.loads(self.show(record["id"], "--json").stdout)
             self.assertEqual((shown["status"], shown["recorded_status"]), ("interrupted", "running"))
             self.assertEqual([entry["status"] for entry in shown["reviewers"]], ["interrupted"] * 3)
-            self.assertEqual(sorted(group["process_group"] for group in shown["live_process_groups"]),
-                             sorted(groups.values()))
+            self.assertEqual(sorted((group["process_group"], group["confirmed"]) for group in shown["live_process_groups"]),
+                             sorted((group, True) for group in groups.values()))
+            # A group whose leader is not the process Baton started (a reused ID) is only reported as uncertain.
+            reused = json.loads((run_dir / "run.json").read_text())
+            for entry in reused["reviewers"]:
+                for attempt in entry["attempts"]:
+                    attempt["process_group_start"] = "Thu Jan  1 00:00:00 1970"
+            (run_dir / "run.json").write_text(json.dumps(reused))
+            output = self.show(str(run_dir)).stdout
+            self.assertNotIn("kill -TERM", output)
+            self.assertIn(f"Warning: process group {groups['claude']} of the claude reviewer may still exist, but its "
+                          f"leader is not the reviewer Baton started; check it with `pgrep -lg {groups['claude']}`",
+                          output)
         finally:
             for group in groups.values():
                 try:

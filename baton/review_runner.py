@@ -29,9 +29,9 @@ from typing import Any, TextIO
 from . import review_records
 from .configuration import configured_branch_prefix, effective_paths, read_config, read_raw_config
 from .errors import NoProject, ProjectError
-from .providers import (PROVIDERS, REVIEW_KILL_GRACE_SECS, ProcessGroups, Provider, ReviewRequest, _nonempty,
+from .providers import (PROVIDERS, REVIEW_KILL_GRACE_SECS, ProcessGroups, Provider, ReviewRequest, _nonempty, process_start,
                         kill_groups_on_signals, resolved_review_models, slugify)
-from .review_records import process_start, write_record
+from .review_records import write_record
 
 
 @dataclass(frozen=True)

@@ -138,6 +138,19 @@ def kill_groups_on_signals(processes: ProcessGroups, exit_codes: Mapping[int, in
             signal.signal(signum, signal.SIG_DFL if handler is None else handler)
 
 
+def process_start(pid: int) -> str | None:
+    """The process's start time as ``ps`` reports it, which tells a reused PID apart; None if it is unknown.
+
+    The locale and time zone are pinned: the runner and a later ``show`` may run with different settings.
+    """
+    try:
+        result = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=10,
+                                env={**os.environ, "LC_ALL": "C", "TZ": "UTC"})
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout.strip() or None
+
+
 def _kill_group(pid: int, signum: int) -> None:
     try:
         os.killpg(pid, signum)
@@ -432,7 +445,7 @@ def run_reviewer_command(command: list[str], request: ReviewRequest, *, stdin: P
         if process is None:
             return 124
         if request.attempts and request.attempts[-1].get("status") is None:
-            request.update_attempt(process_group=process.pid)
+            request.update_attempt(process_group=process.pid, process_group_start=process_start(process.pid))
         if completed is not None:
             return _wait_for_review_completion(process, processes, completed, deadline, timeout, command, stderr)
         try:
