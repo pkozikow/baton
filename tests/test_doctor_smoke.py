@@ -221,7 +221,9 @@ class DoctorSmokeTests(unittest.TestCase):
         elapsed = time.monotonic() - started
         codex = next(check for check in checks if check['name'] == 'model:codex:default')
         self.assertEqual(codex['status'], 'fail', checks)
-        self.assertIn('exit 124', codex['message'])
+        # The deadline either stops an attempt (124) or leaves no time for the next fallback, when the last
+        # attempt's own failure (7) stands; either way all attempts fit in one budget.
+        self.assertRegex(codex['message'], r'\(exit (124|7)\)')
         self.assertLess(elapsed, 4.5)
         self.assertGreater(sum(call['provider'] == 'codex' for call in self.calls()), 1)
 
