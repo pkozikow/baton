@@ -199,8 +199,10 @@ def classify_failure(status: int, lines: list[str]) -> tuple[str, str | None, bo
 
 
 def _diagnostic_lines(path: Path) -> list[str]:
-    # Baton's own timeout note quotes the command line, which can carry the prompt.
-    return [line for line in _tail_lines(path) if not line.startswith(TIMEOUT_NOTE)]
+    # Baton's own timeout note comes last and quotes the command line, whose prompt can span several lines.
+    lines = _tail_lines(path)
+    note = next((index for index, line in enumerate(lines) if line.startswith(TIMEOUT_NOTE)), len(lines))
+    return lines[:note]
 
 
 def _tail_lines(path: Path, limit: int = 65536) -> list[str]:

@@ -288,7 +288,9 @@ def plan_input(target: str | None, extra: str, timeout: int, status: Callable[[]
     try:
         data = status()
     except (OSError, ValueError, ProjectError) as error:
-        raise ReviewError(f"cannot resolve the project ({error}); provide PLAN_FILE explicitly.") from None
+        if target is None:
+            raise ReviewError(f"cannot resolve the project ({error}); provide PLAN_FILE explicitly.") from None
+        raise ReviewError(f"cannot resolve the project's repositories for reviewers ({error}).") from None
     try:
         projects_root = Path(os.environ.get("PLAN_REVIEW_PROJECTS_ROOT")
                              or effective_paths(read_raw_config(), keys=("artifacts_root",))["artifacts_root"])
@@ -422,7 +424,7 @@ def diff_file_names(paths: list[str]) -> dict[str, str]:
         parts = Path(name).parts
         parents = {"/".join(parts[:end]).casefold() for end in range(1, len(parts))}
         if (Path(path).is_absolute() or any(part in ("", ".", "..") for part in Path(path).parts) or not parts
-                or any(len(part.encode()) > 200 for part in parts)
+                or any(len(os.fsencode(part)) > 200 for part in parts)
                 or name.casefold() in files | directories or parents & files):
             parents = set()
             suffix = index + 1
@@ -530,7 +532,8 @@ def implementation_input(target: str | None, extra: str, focus: tuple[str, str] 
         record["input"] = {"files": len(diffs), "diff_bytes": size, "max_embedded_bytes": max_bytes,
                            "diffs": str(directory), "embedded": [diff.path for diff in embedded],
                            "not_embedded": [diff.path for diff in omitted]}
-        review.input = ("\n".join(listing) + "\n\nEmbedded diffs:\n\n").encode() + b"".join(
+        # Paths that are not valid UTF-8 keep their original bytes.
+        review.input = ("\n".join(listing) + "\n\nEmbedded diffs:\n\n").encode(errors="surrogateescape") + b"".join(
             diff.patch for diff in embedded)
         review.read_dirs = (top, directory)
         review.prompt = IMPLEMENTATION_PROMPT.format(

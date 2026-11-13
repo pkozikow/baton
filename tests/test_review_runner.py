@@ -687,8 +687,8 @@ class PlanReviewGoldenTest(ReviewRunnerFixture):
         # seconds), well below the 60s it would sleep.
         self.env.update(STUB_CLAUDE="hang", PLAN_REVIEW_CLAUDE_TIMEOUT_SECS="5")
         started = time.monotonic()
-        result = self.review("--kind=plan", "--reviewers=claude,agy", "--extra-prompt", "Watch for rate limit 429 handling",
-                             str(self.plan))
+        result = self.review("--kind=plan", "--reviewers=claude,agy", "--extra-prompt",
+                             "Watch\nfor rate limit 429 handling", str(self.plan))
         self.assertLess(time.monotonic() - started, 10)
         run_dir = self.run_dir(result)
         log = (run_dir / "golden-plan-review-claude.log").read_text()
@@ -990,6 +990,19 @@ class PeerReviewGoldenTest(ReviewRunnerFixture):
         self.assertIn("deleted file mode 100644", (diffs / "link.diff").read_text())
         self.assertIn("Subproject commit", (diffs / "module.diff").read_text())
         self.assertIn("+two", (diffs / "plain.txt.diff").read_text())
+
+    def test_file_names_that_are_not_utf8_are_reviewed(self) -> None:
+        name = os.fsdecode(b"caf\xe9.txt")
+        try:
+            (self.repo / name).write_text("latin\n")
+        except OSError:
+            self.skipTest("the file system accepts only UTF-8 names")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "Latin-1 name")
+        result = self.peer_review("claude")
+        self.assertEqual(self.reviewer(result, "claude")["status"], "succeeded")
+        self.assertTrue((self.run_dir(result) / "diffs" / (name + ".diff")).is_file())
+        self.assertIn(b"caf\xe9.txt", (self.run_dir(result) / "feature-review.input.txt").read_bytes())
 
     def test_failed_fetch_is_a_recorded_warning(self) -> None:
         self.commit()
