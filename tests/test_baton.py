@@ -52,21 +52,3 @@ class BatonConfigurationTest(unittest.TestCase):
         result = subprocess.run([str(root / "bin/baton"), "--help"], text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("usage: baton", result.stdout)
-
-    def test_review_helpers_prefer_baton_and_respect_override(self) -> None:
-        root = Path(__file__).resolve().parents[1]
-        with tempfile.TemporaryDirectory() as temporary:
-            directory = Path(temporary)
-            for name in ("baton", "override"):
-                executable = directory / name
-                executable.write_text("#!/bin/sh\nprintf '%s\\n' '{\"name\":\"" + name + "\"}'\n")
-                executable.chmod(0o755)
-            environment = dict(os.environ, PATH=str(directory) + os.pathsep + os.environ["PATH"])
-            environment.pop("BATON_CLI", None)
-            command = ["bash", "-c", 'source "$1"; review_project_value name', "bash",
-                       str(root / "agent-skills/review-runner-lib.sh")]
-            for override, expected in ((None, "baton"), (str(directory / "override"), "override")):
-                selected = environment | ({"BATON_CLI": override} if override else {})
-                result = subprocess.run(command, env=selected, capture_output=True, text=True)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(result.stdout.strip(), expected)

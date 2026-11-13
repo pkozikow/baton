@@ -76,18 +76,35 @@ failed approval or unresolved scope decision, and stop when the user asks.
 4. Run general rounds sequentially, up to `general_rounds`. Each round is a fresh
    dry-run dispatcher pass with `Focus area: none` and no catalog guidance or
    focused model override; review workers must
-   not modify files. Read its final triaged report, apply accepted fixes as the
+   not modify files. From the second round on, add the findings earlier rounds
+   rejected or deferred to that round's `Extra review focus`, each with its
+   one-line rationale, marked "already triaged; re-raise only with new evidence".
+   Read its final triaged report, apply accepted fixes as the
    parent under the same rules as step 3, and validate and commit changes before
    another round.
-5. Stop the general phase early if that round's report contains no accepted
-   P0/P1/P2 findings. Otherwise continue only while the configured budget remains.
-   Fixing a report's findings does not turn that report into a clean review.
-6. If the general budget is exhausted without a clean pass, finish with the limit
+5. Stop the general phase early on a clean round: a completed report with no
+   accepted P0/P1/P2 findings and, when two or more reviewers are configured, at
+   least two reviewers that produced a review (the report's coverage, N of M).
+   Fixing a report's findings does not turn that report into a clean review, and a
+   round below that coverage is never the clean stopping round. Otherwise continue
+   only while the configured budget remains.
+6. If a round cannot be clean for a reason the next round would repeat, such as
+   reviewers that keep failing for the same reason (`auth`, `missing_cli`,
+   `startup_denied`, or the same failure in consecutive rounds), finish that
+   round's fixes and end the general phase there, reporting a coverage blocker
+   that names the failing reviewers and reasons. Do not spend the remaining
+   rounds on identical runs.
+7. If the general budget is exhausted without a clean pass, finish with the limit
    reached, findings fixed or unresolved, and validation status. Do not launch an
    extra confirmation round. If `general_rounds` is zero, finish after the focused
    phase and report that general review was skipped.
 
+Every pass is recorded by its dispatcher: inside a project, each run is saved with
+`baton review save` (a branch worker running this loop saves its own runs), so
+`baton review list` finds them later.
+
 Finish with the configured and completed focused-pass counts, general rounds used
-and limit, accepted fixes, validation, rejected/deferred or unresolved findings,
-and the stopping reason. Distinguish a clean general review from a skipped phase
-or an exhausted budget.
+and limit, each pass's coverage (N of M reviewers, with failed reviewers and their
+reasons), accepted fixes, validation, rejected/deferred or unresolved findings,
+and the stopping reason. Distinguish a clean general review from a skipped phase,
+a coverage blocker or an exhausted budget.

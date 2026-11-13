@@ -4,6 +4,25 @@
 
 Initial public release.
 
+- Reviews run on one runner and one executor. `baton review run --kind
+  plan|implementation` replaces the `plan-peer-review.sh` and `peer-review.sh`
+  scripts, and the `baton-review-executor` skill replaces
+  `baton-plan-review-executor` and `baton-peer-review-executor` (`baton skills
+  install` removes their managed links); `baton-peer-review` dispatches plan
+  reviews too. Every run writes a `run.json` record with each reviewer's outcome,
+  failure reason and per-attempt session IDs; `baton review show` and `list` find
+  and inspect runs (a run whose runner died shows as `interrupted`), and the
+  trusted `baton review save` copies a finished run into the project's artifacts.
+  Implementation reviews embed whole per-file diffs up to the size limit and let
+  reviewers read the rest and the repository on demand, instead of cutting the diff;
+  prompts state an inspection budget and deadline; rate limits and transient errors
+  are retried once within the reviewer's timeout; failures are classified rather
+  than reported as `unavailable`; Codex fallbacks share one deadline and keep the
+  timed-out attempt's log; a failed `git fetch` is a warning. The review loop needs
+  two successful reviewers for a clean general round, ends on persistent reviewer
+  failures as a coverage blocker, and passes earlier rejected findings to later
+  rounds.
+
 - `baton config set` removes model entries and tier mappings with repeatable
   `--remove-plan-review-model`, `--remove-implementation-review-model`,
   `--remove-worker-model` (each `PROVIDER`) and `--remove-model-tier

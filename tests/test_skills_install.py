@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from baton.skills_install import MANIFEST, SKILLS, WORKFLOW, bundled_skills, install_skills
+from baton.skills_install import MANIFEST, RETIRED_SKILLS, SKILLS, WORKFLOW, bundled_skills, install_skills
 
 
 class SkillsInstallTest(unittest.TestCase):
@@ -40,8 +40,10 @@ class SkillsInstallTest(unittest.TestCase):
         self.assertEqual((custom / "SKILL.md").read_text(), "custom")
         manifest = json.loads((target / MANIFEST).read_text())
         self.assertEqual(set(manifest["links"]), set(SKILLS) - {WORKFLOW})
-        result = subprocess.run(["bash", str(target / "baton-plan/scripts/plan-peer-review.sh"), "--help"], text=True, capture_output=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
+        executor = (target / "baton-review-executor/SKILL.md").read_text()
+        self.assertIn("baton review run --kind plan", executor)
+        self.assertTrue((target / "baton-plan/SKILL.md").resolve().parent.joinpath(
+            "../baton-review-executor/SKILL.md").resolve().is_file())
 
 
     def test_update_repoints_owned_links_to_new_bundle(self) -> None:
@@ -55,6 +57,47 @@ class SkillsInstallTest(unittest.TestCase):
         self.assertEqual((target / "baton-retro").resolve(), (second / "baton-retro").resolve())
         manifest = json.loads((target / MANIFEST).read_text())
         self.assertEqual(manifest["links"]["baton-retro"], str((second / "baton-retro").resolve()))
+
+    def test_reinstall_removes_retired_skills_that_the_manifest_owns(self) -> None:
+        target, other = self.root / "skills", self.root / "other"
+        previous = self.root / "release-1"
+        shutil.copytree(bundled_skills(), previous)
+        for name in RETIRED_SKILLS:
+            (previous / name).mkdir()
+            (previous / name / "SKILL.md").write_text(f"---\nname: {name}\n---\n")
+        # A manifest as the previous release wrote it: the retired executors were managed links.
+        install_skills([target, other], previous)
+        for directory in (target, other):
+            manifest = json.loads((directory / MANIFEST).read_text())
+            manifest["links"].update({name: str(previous / name) for name in RETIRED_SKILLS})
+            (directory / MANIFEST).write_text(json.dumps(manifest))
+            for name in RETIRED_SKILLS:
+                (directory / name).symlink_to(previous / name, target_is_directory=True)
+        # A link the user repointed is no longer Baton's to remove.
+        repointed = other / RETIRED_SKILLS[0]
+        repointed.unlink()
+        repointed.symlink_to(self.root, target_is_directory=True)
+        install_skills([target, other])
+        for name in RETIRED_SKILLS:
+            self.assertFalse((target / name).is_symlink() or (target / name).exists())
+        self.assertEqual(os.readlink(repointed), str(self.root))
+        self.assertFalse((other / RETIRED_SKILLS[1]).is_symlink())
+        for directory in (target, other):
+            manifest = json.loads((directory / MANIFEST).read_text())
+            self.assertEqual(set(manifest["links"]), set(SKILLS) - {WORKFLOW})
+            self.assertTrue((directory / "baton-review-executor/SKILL.md").is_file())
+        # The next install no longer knows the repointed link and leaves it alone.
+        install_skills([target, other])
+        self.assertEqual(os.readlink(repointed), str(self.root))
+
+    def test_manifest_with_unknown_skill_is_rejected(self) -> None:
+        target = self.root / "skills"
+        install_skills([target])
+        manifest = json.loads((target / MANIFEST).read_text())
+        manifest["links"]["baton-unknown"] = str(self.root)
+        (target / MANIFEST).write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(ValueError, "Invalid managed skill links"):
+            install_skills([target])
 
     def test_conflict_preflight_does_not_install_other_targets(self) -> None:
         a, b = self.root / "a", self.root / "b"

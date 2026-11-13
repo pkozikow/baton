@@ -1,3 +1,5 @@
+"""Implementation reviews as the review skills run them: `baton review run --kind implementation`."""
+
 import json
 import os
 from pathlib import Path
@@ -10,7 +12,7 @@ import uuid
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / "agent-skills/baton-peer-review-executor/scripts/peer-review.sh"
+BATON = ROOT / "bin/baton"
 sys.path.insert(0, str(ROOT / "tests"))
 import test_project_manager as fixtures  # noqa: E402
 
@@ -19,7 +21,7 @@ import json, os, pathlib, sys
 args = sys.argv[1:]
 with open(os.environ["REVIEW_TEST_CALLS"], "a") as handle:
     handle.write(json.dumps(args) + "\\n")
-assert "Git diff to review:" in sys.stdin.read()
+assert "Changes to review:" in sys.stdin.read()
 pathlib.Path(args[args.index("--output-last-message") + 1]).write_text("## Summary\\nTest review\\n")
 '''
 
@@ -43,6 +45,7 @@ def artifacts_dir(test: unittest.TestCase, result: subprocess.CompletedProcess[s
     test.assertIn(f"Artifacts: {run_dir}", result.stderr)
     test.assertTrue(run_dir.is_dir())
     test.assertEqual(run_dir.stat().st_mode & 0o777, 0o700)
+    test.assertTrue((run_dir / "run.json").is_file())
     return run_dir
 
 
@@ -64,7 +67,6 @@ class PeerReviewTest(unittest.TestCase):
         for key in ("BATON_REPO", "BATON_SLOTS_ROOT", "BATON_WORKTREES_ROOT",
                     "BATON_REPOS_ROOT", "BATON_ARTIFACTS_ROOT"):
             self.env[key] = str(unused / key.lower())
-        self.env["BATON_CLI"] = str(ROOT / "bin/baton")
         self.project_config = self.repo / "project-config.json"
         self.env["BATON_CONFIG_FILE"] = str(self.project_config)
         self.calls = install_fake_codex(self.config, self.env)
@@ -92,21 +94,9 @@ class PeerReviewTest(unittest.TestCase):
     def git(self, *args: str, cwd: Path | None = None) -> None:
         subprocess.run(["git", *args], cwd=cwd or self.repo, env=self.env, check=True, capture_output=True)
 
-    def stub_project_status(self, **entry: object) -> None:
-        """Serves a fixed `baton status --json` whose current entry is this branch."""
-        status = {"name": "stub", "errors": [], "current_entry": {
-            "branch": self.branch, "base_reliable": True, "base_ref": "main", "needs_rebase": False, **entry}}
-        status_path = self.config / "status.json"
-        status_path.write_text(json.dumps(status))
-        stub = self.config / "project"
-        stub.write_text(f"#!/usr/bin/env bash\nif [[ $1 == config || $1 == review ]]; then exec '{ROOT / 'bin/baton'}' \"$@\"; fi\n"
-                        f"cat '{status_path}'\n")
-        stub.chmod(0o755)
-        self.env["BATON_CLI"] = str(stub)
-
-    def review(self, model: str, reasoning: str, script: Path = SCRIPT, *base: str) -> subprocess.CompletedProcess[str]:
-        result = subprocess.run(["bash", str(script), *(base or ("main",))], cwd=self.repo,
-                                env=self.env, text=True, capture_output=True)
+    def review(self, model: str, reasoning: str, *base: str) -> subprocess.CompletedProcess[str]:
+        result = subprocess.run([str(BATON), "review", "run", "--kind=implementation", *(base or ("main",))],
+                                cwd=self.repo, env=self.env, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
         self.assertEqual(len(calls), 1)
@@ -163,20 +153,19 @@ class PeerReviewTest(unittest.TestCase):
             "implementation_review_model": {"codex": "explicit-model"}}))
         self.review("explicit-model", "medium")
 
-    def test_installed_symlink_invocation(self) -> None:
-        self.env["HOME"] = str(self.repo)
-        skills = Path(self.env["HOME"]) / ".agents/skills"
-        skills.mkdir(parents=True)
-        installed = skills / "baton-peer-review-executor"
-        installed.symlink_to(SCRIPT.parents[1], target_is_directory=True)
-        self.assertFalse((skills / "review-runner-lib.sh").exists())
-        self.review("default", "high", installed / "scripts/peer-review.sh")
-
     def test_default_base_outside_framework_uses_origin_head(self) -> None:
         self.git("update-ref", "refs/remotes/origin/trunk", "main")
         self.git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
-        result = self.review("default", "high", SCRIPT, "--")
+        result = self.review("default", "high", "--")
         self.assertIn("Base ref: origin/trunk (default branch)", result.stderr)
+
+    def test_extra_prompt_environment_is_rejected(self) -> None:
+        self.env["PEER_REVIEW_EXTRA_PROMPT"] = "focus"
+        result = subprocess.run([str(BATON), "review", "run", "--kind=implementation", "main"], cwd=self.repo,
+                                env=self.env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("PEER_REVIEW_EXTRA_PROMPT is no longer supported. Use --extra-prompt instead.", result.stderr)
+        self.assertEqual(list(self.tmp.iterdir()), [])
 
     def test_concurrent_runs_of_one_branch_in_different_repos_use_distinct_dirs(self) -> None:
         # Same repo basename too: uniqueness must come from the run directory, not the label.
@@ -184,8 +173,9 @@ class PeerReviewTest(unittest.TestCase):
         for index, repo in enumerate(repos):
             repo.mkdir(parents=True)
             self.make_branch(repo, "baton/shared", f"change-{index}.txt")
-        procs = [subprocess.Popen(["bash", str(SCRIPT), "main"], cwd=repo, env=self.env, text=True,
-                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE) for repo in repos]
+        procs = [subprocess.Popen([str(BATON), "review", "run", "--kind=implementation", "main"], cwd=repo,
+                                  env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                 for repo in repos]
         results = []
         for proc in procs:
             stdout, stderr = proc.communicate(timeout=60)
@@ -193,63 +183,16 @@ class PeerReviewTest(unittest.TestCase):
             results.append(subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr))
         run_dirs = [artifacts_dir(self, result) for result in results]
         self.assertNotEqual(run_dirs[0], run_dirs[1])
+        ids = [json.loads((run_dir / "run.json").read_text())["id"] for run_dir in run_dirs]
+        self.assertNotEqual(ids[0], ids[1])
         for index, run_dir in enumerate(run_dirs):
             self.assertTrue(run_dir.name.startswith("peer-review.repo-baton-shared."), run_dir)
             diff = (run_dir / "baton-shared.diff").read_text()
             self.assertIn(f"change-{index}.txt", diff)
             self.assertNotIn(f"change-{1 - index}.txt", diff)
+            self.assertTrue((run_dir / "diffs" / f"change-{index}.txt.diff").is_file())
             self.assertTrue((run_dir / "baton-shared-review-codex-default.md").read_text())
         self.assertEqual(len(self.calls.read_text().splitlines()), 2)
-
-    def test_installed_baton_without_review_run_is_too_old(self) -> None:
-        old = self.config / "old-baton"
-        old.write_text(f"#!/usr/bin/env bash\nif [[ $1 == review ]]; then echo 'invalid choice' >&2; exit 2; fi\n"
-                       f"exec '{ROOT / 'bin/baton'}' \"$@\"\n")
-        old.chmod(0o755)
-        self.env["BATON_CLI"] = str(old)
-        result = subprocess.run(["bash", str(SCRIPT), "main"], cwd=self.repo, env=self.env, text=True,
-                                capture_output=True)
-        self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn("Error: installed Baton too old; reinstall Baton to get 'baton review run'.", result.stderr)
-        self.assertNotIn("REVIEW_ARTIFACTS=", result.stdout)
-        self.assertFalse(self.calls.exists())
-        self.assertEqual(list(self.tmp.iterdir()), [])
-
-    def test_stale_stack_child_stops_unless_allowed(self) -> None:
-        self.stub_project_status(needs_rebase=True)
-        result = subprocess.run(["bash", str(SCRIPT)], cwd=self.repo, env=self.env, text=True,
-                                capture_output=True)
-        self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn("behind its predecessor main", result.stderr)
-        self.assertIn("the parent must run gh stack rebase before this review", result.stderr)
-        self.assertNotIn("REVIEW_ARTIFACTS=", result.stdout)
-        self.assertFalse(self.calls.exists())
-        self.assertEqual(list(self.tmp.iterdir()), [])
-
-        result = self.review("default", "high", SCRIPT, "--allow-stale-base")
-        self.assertIn("Warning: reviewing a stack child that is behind its predecessor main", result.stderr)
-        self.assertIn("Base ref: main (expected PR base", result.stderr)
-
-    def test_current_base_proceeds(self) -> None:
-        self.stub_project_status(needs_rebase=False)
-        result = self.review("default", "high", SCRIPT, "--")
-        self.assertIn("Base ref: main (expected PR base", result.stderr)
-        self.assertNotIn("Warning: reviewing a stack child", result.stderr)
-
-    def test_default_base_prefers_installed_baton(self) -> None:
-        # A branch checkout's runner must not run that branch's own project against real state.
-        del self.env["BATON_CLI"]
-        installed = self.repo / "installed-bin"
-        installed.mkdir()
-        marker = self.repo / "installed-project-sh-called"
-        (installed / "baton").write_text(f"#!/usr/bin/env bash\ntouch '{marker}'\nif [[ $1 == config || $1 == review ]]; "
-                                         f"then exec '{ROOT / 'bin/baton'}' \"$@\"; fi\nexit 3\n")
-        (installed / "baton").chmod(0o755)
-        self.env["PATH"] = f"{installed}:{self.env['PATH']}"
-        self.git("update-ref", "refs/remotes/origin/main", "main")
-        result = self.review("default", "high", SCRIPT, "--")
-        self.assertTrue(marker.exists())
-        self.assertIn("Base ref: origin/main", result.stderr)
 
 
 class FrameworkBaseTest(unittest.TestCase):
@@ -263,7 +206,6 @@ class FrameworkBaseTest(unittest.TestCase):
         env = self.fixture.env
         for key in [key for key in env if key.startswith(("PEER_REVIEW_", "CODEX_"))]:
             del env[key]
-        env["BATON_CLI"] = str(ROOT / "bin/baton")
         self.calls = install_fake_codex(self.fixture.root, env)
         tmp = self.fixture.root / "review-tmp"
         tmp.mkdir()
@@ -282,20 +224,33 @@ class FrameworkBaseTest(unittest.TestCase):
         self.fixture.git(checkout, "add", filename)
         self.fixture.git(checkout, "commit", "-m", f"Add {filename}")
 
-    def review(self, checkout: Path, ok: bool = True) -> subprocess.CompletedProcess[str]:
-        return self.fixture.run_command(["bash", str(SCRIPT)], checkout, ok=ok)
+    def review(self, checkout: Path, *args: str, ok: bool = True) -> subprocess.CompletedProcess[str]:
+        return self.fixture.run_command([str(BATON), "review", "run", "--kind=implementation", *args], checkout, ok=ok)
 
     def test_stack_child_reviews_against_predecessor(self) -> None:
         result = self.review(self.child)
         self.assertIn(f"Base ref: refs/heads/baton/{self.name} (expected PR base", result.stderr)
-        diff = (artifacts_dir(self, result) / f"baton-{self.name}-api.diff").read_text()
+        run_dir = artifacts_dir(self, result)
+        diff = (run_dir / f"baton-{self.name}-api.diff").read_text()
         self.assertIn("api.txt", diff)
         self.assertNotIn("root.txt", diff)
+        self.assertEqual(json.loads((run_dir / "run.json").read_text())["project"]["name"], self.name)
 
     def test_stack_root_reviews_against_default_branch(self) -> None:
         result = self.review(self.root)
         self.assertIn("Base ref: refs/remotes/origin/main (expected PR base", result.stderr)
         self.assertIn("root.txt", (artifacts_dir(self, result) / f"baton-{self.name}.diff").read_text())
+
+    def test_stale_stack_child_stops_unless_allowed(self) -> None:
+        self.commit(self.root, "later.txt")
+        result = self.review(self.child, ok=False)
+        self.assertIn(f"Error: this stack child is behind its predecessor refs/heads/baton/{self.name}; the parent "
+                      "must run gh stack rebase before this review (or pass --allow-stale-base).", result.stderr)
+        self.assertNotIn("REVIEW_ARTIFACTS=", result.stdout)
+        self.assertFalse(self.calls.exists())
+        result = self.review(self.child, "--allow-stale-base")
+        self.assertIn("Warning: reviewing a stack child that is behind its predecessor", result.stderr)
+        self.assertIn(f"Base ref: refs/heads/baton/{self.name} (expected PR base", result.stderr)
 
     def test_unreliable_base_stops_with_reason(self) -> None:
         (self.source / ".git" / "gh-stack-rebase-state").write_text("{}")
@@ -304,6 +259,8 @@ class FrameworkBaseTest(unittest.TestCase):
         self.assertIn("native gh stack rebase", result.stderr)
         self.assertNotIn("Base ref:", result.stderr)
         self.assertFalse(self.calls.exists())
+        # An explicit base skips the project lookup.
+        self.review(self.child, "main")
 
 
 if __name__ == "__main__":
