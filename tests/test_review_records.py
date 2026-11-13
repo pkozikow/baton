@@ -75,6 +75,8 @@ class RunStatusTest(ReviewRunnerFixture):
             output = self.show(str(run_dir)).stdout.splitlines()
             self.assertIn(f"Review run {record['id']} (plan): interrupted (recorded as running; runner pid "
                           f"{record['pid']} is gone)", output)
+            work = run_dir / "golden-plan-review-agy.work"
+            self.assertTrue(any(f"cwd temporary {work} (still present)" in line for line in output), output)
             for name, group in groups.items():
                 self.assertIn(f"Warning: {name} reviewer process group {group} is still running after its runner "
                               f"stopped; stop it with: kill -TERM -{group}", output)
@@ -253,6 +255,24 @@ class SaveTest(unittest.TestCase):
         self.assertNotIn("already saved", result.stdout)
         self.assertEqual(json.loads((leftover / "run.json").read_text()), record)
         self.assertTrue(self.fixture.git(self.fixture.artifacts, "ls-files", "--", str(leftover / "run.json")))
+
+    def test_failed_save_leaves_nothing_and_empty_reviews_are_not_saved(self) -> None:
+        run_dir = self.run_dir(self.baton("review", "run", "--kind=plan"))
+        record = json.loads((run_dir / "run.json").read_text())
+        empty = run_dir / f"{self.directory.name}-plan-review-agy.md"
+        empty.write_text("")
+        lock = Path(self.fixture.git(self.fixture.artifacts, "rev-parse", "--absolute-git-dir")) / "index.lock"
+        lock.write_text("")
+        try:
+            result = self.baton("review", "save", str(run_dir), ok=False)
+        finally:
+            lock.unlink()
+        self.assertIn("index.lock", result.stderr)
+        self.assertFalse((self.directory / "reviews").exists())
+        self.baton("review", "save", str(run_dir))
+        saved = self.directory / "reviews" / record["id"]
+        self.assertEqual(sorted(path.name for path in saved.iterdir()),
+                         [f"{self.directory.name}-plan-review-claude.md", "run.json"])
 
     def test_save_outside_a_project_has_nothing_to_save(self) -> None:
         plan = self.fixture.root / "loose-plan.md"

@@ -81,8 +81,9 @@ whether it was embedded. The prompt names the base, merge base and head commits 
 lists the changed files (a list too long for the input is summarized by directory
 and points to the index). `PEER_REVIEW_MAX_INPUT_BYTES` (default 180,000) bounds the
 whole reviewer input: prompt, listing and embedded diffs. Whole per-file diffs are
-embedded while they fit, source first, then data and schema files (YAML, JSON, CSV,
-XML, snapshots), then generated, lock and binary files. The default stays below the
+embedded while they fit, source code first, then documentation and repository meta
+files (Markdown, reStructuredText, text, `.gitignore`, license files), then data and
+schema files (YAML, JSON, CSV, XML, snapshots), then generated, lock and binary files. The default stays below the
 size at which agy silently drops the rest of its message (about 191,000 bytes), and
 every provider gets the same input. Reviewers open the other diffs, and the
 surrounding code, on demand: they may read the repository and the diffs directory.
@@ -124,7 +125,10 @@ session ID as soon as it is known, so a killed run still names its sessions. Eac
 Codex fallback and each retry is a separate attempt; the accepted one is marked.
 Claude reviewers get a fresh session ID per attempt, Codex reports its own in its
 log and agy in its stream; Cursor exposes none. agy runs in a private temporary
-directory, so its working directory is recorded as temporary rather than as a path.
+directory that its attempt removes, so that directory is recorded apart from the
+working directory and `show` says whether it is still present. A run that fails
+before its reviewers start records its error, and `show` names each failed
+reviewer's `.md.failed` or `.md.invalid` output.
 Command lines and prompts are not recorded.
 
 `baton review show RUN` (a run ID, run directory or `run.json`) prints the record,
@@ -150,7 +154,8 @@ copies a finished run's `run.json` and review files (`.md`, `.md.failed`,
 `.md.invalid`) once into the project's artifacts at `reviews/<run-id>/` and commits
 them like `baton artifacts commit`. It refuses a run that is still running or that
 belongs to another project, and checks the artifact checkout before copying
-anything; a failed save leaves no copy behind. Saving again is a no-op that retries
+anything; a failed save leaves no copy behind, and empty review files left by a
+killed run are not saved. Saving again is a no-op that retries
 the commit; an uncommitted copy left by a failed save is replaced.
 Outside a project there is nothing to save (exit 3). Prompts, diffs and logs stay in
 the temporary run directory. `baton review list [--selector PROJECT] [--json]` lists

@@ -163,8 +163,10 @@ def save(run_dir: Path, selector: str | None) -> int:
     if saved_root.is_symlink() or (saved_root.exists() and not saved_root.is_dir()):
         raise ProjectError(f"Unsafe review runs directory: {saved_root}")
     destination = saved_root / record["id"]
-    files = sorted(path for path in run_dir.iterdir()
-                   if path.is_file() and not path.is_symlink() and path.name.endswith(REVIEW_SUFFIXES))
+    # A killed run leaves empty review files behind; they hold nothing worth saving.
+    files = sorted(path for path in run_dir.iterdir() if path.is_file() and not path.is_symlink()
+                   and path.name.endswith(REVIEW_SUFFIXES) and path.stat().st_size > 0)
+    created_root = not saved_root.exists()
     def tracked() -> bool:
         """Whether git holds the saved record, staged or committed."""
         record_path = str(destination / RECORD)
@@ -183,25 +185,30 @@ def save(run_dir: Path, selector: str | None) -> int:
                                      for path in files):
             raise ProjectError(f"{destination} already holds a different copy of review run {record['id']}.")
         print(f"Review run {record['id']} is already saved in {destination}.")
-    else:
-        staging = saved_root / f".{record['id']}.saving-{os.getpid()}"
-        shutil.rmtree(staging, ignore_errors=True)
-        staging.mkdir(parents=True)
-        try:
-            for path in files:
-                shutil.copyfile(path, staging / path.name)
-            write_record(staging, record)
-            staging.replace(destination)
-        finally:
-            shutil.rmtree(staging, ignore_errors=True)
     paths = [str(destination / RECORD), *(str(destination / path.name) for path in files)]
     try:
+        if created:
+            staging = saved_root / f".{record['id']}.saving-{os.getpid()}"
+            shutil.rmtree(staging, ignore_errors=True)
+            staging.mkdir(parents=True)
+            try:
+                for path in files:
+                    shutil.copyfile(path, staging / path.name)
+                write_record(staging, record)
+                staging.replace(destination)
+            finally:
+                shutil.rmtree(staging, ignore_errors=True)
         # Committing an already saved copy commits nothing but retries an earlier failed push.
         manager.commit_artifacts(project, f"Save {record.get('kind')} review run {record['id']}", paths)
     except BaseException:
         # Only a copy git never took is removed; a staged or committed one stays for the retry to finish.
         if created and not tracked():
             shutil.rmtree(destination, ignore_errors=True)
+            if created_root:
+                try:
+                    saved_root.rmdir()
+                except OSError:
+                    pass
         raise
     print(f"Saved review run {record['id']} to {destination}")
     return 0
@@ -274,6 +281,8 @@ def show(run: str, selector: str | None, as_json: bool) -> int:
     print(f"Record: {directory / RECORD}" + (" (saved)" if saved else ""))
     print(f"Started: {record.get('started')}; finished: {record.get('finished') or 'not yet'}")
     print(f"Run directory: {_path(record.get('run_dir'))}")
+    if record.get("error"):
+        print(f"Error: {record['error']}")
     if record.get("plan"):
         print(f"Plan: {_path(record['plan'])}")
     if record.get("branch"):
@@ -300,11 +309,19 @@ def show(run: str, selector: str | None, as_json: bool) -> int:
               + (f" after {duration}s" if duration is not None else ""))
         if reviewer.get("review"):
             print(f"    review: {_path(reviewer['review'], copy)}")
+        if reviewer.get("failed_output"):
+            print(f"    failed output: {_path(reviewer['failed_output'], copy)}")
         if reviewer.get("log"):
             print(f"    log: {_path(reviewer['log'])}")
         for index, attempt in enumerate(reviewer.get("attempts") or [], 1):
             details = "".join(f", {key} {attempt[key]}" for key in ("reasoning",) if attempt.get(key))
-            cwd = _path(attempt["cwd"]) if attempt.get("cwd") else f"temporary ({attempt.get('cwd_note') or 'removed'})"
+            if attempt.get("cwd"):
+                cwd = _path(attempt["cwd"])
+            elif attempt.get("temporary_cwd"):
+                present = Path(attempt["temporary_cwd"]).exists()
+                cwd = f"temporary {attempt['temporary_cwd']} ({'still present' if present else 'removed'})"
+            else:
+                cwd = "unknown"
             ended = "unfinished" if attempt.get("status") is None else f"exit {attempt['status']}"
             print(f"    attempt {index}: {reviewer.get('provider')} session {attempt.get('session_id') or 'unknown'}, "
                   f"cwd {cwd}, {ended}{details}" + (" [accepted]" if attempt.get("accepted") else ""))

@@ -69,8 +69,11 @@ FETCH_TIMEOUT_SECS = 60
 DEPRIORITIZED = re.compile(r"(^|/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|[^/]*\.lock|"
                            r"go\.sum|[^/]*\.min\.(js|css)|[^/]*_pb2(_grpc)?\.pyi?|[^/]*\.pb\.go|[^/]*\.snap)$|"
                            r"(^|/)(generated|__generated__|vendor|node_modules|dist)/")
-# Data and schema files are embedded after source code, which reviewers learn more from.
+# Reviewers learn most from source code, so documentation, meta, data and schema files are embedded after it.
 DATA_FILES = re.compile(r"\.(ya?ml|json|jsonl|ndjson|csv|tsv|xml|snap)$", re.IGNORECASE)
+DOCUMENTATION = re.compile(r"\.(md|markdown|mdx|rst|txt|adoc|asciidoc|org)$|(^|/)(\.git(ignore|attributes|modules)|"
+                           r"\.(docker|npm)ignore|\.editorconfig|(LICEN[CS]E|NOTICE|COPYING|AUTHORS|CODEOWNERS|"
+                           r"CHANGELOG|CHANGES)([.-][^/]*)?|MANIFEST\.in)$", re.IGNORECASE)
 DIFF_INDEX = "INDEX.txt"
 EMBEDDED_HEADING = b"\n\nEmbedded diffs:\n\n"
 # Pinned so user configuration cannot change how many "diff --git" sections a change produces.
@@ -376,10 +379,13 @@ class FileDiff:
 
     @property
     def priority(self) -> int:
-        """Embedding order: source first, then data and schema files, then generated, lock and binary files."""
+        """Embedding order: source code, then documentation and repository meta files, then data and schema
+        files, then generated, lock and binary files."""
         if DEPRIORITIZED.search(self.path) or re.search(rb"(?m)^(Binary files |GIT binary patch)", self.patch):
+            return 3
+        if DATA_FILES.search(self.path):
             return 2
-        return 1 if DATA_FILES.search(self.path) else 0
+        return 1 if DOCUMENTATION.search(self.path) else 0
 
 
 def directory_summary(diffs: list["FileDiff"], limit: int = 60) -> list[str]:
@@ -703,6 +709,8 @@ def run(kind: str, reviewers: list[Reviewer], skipped: list[Skipped], review: Re
                 failure=None if succeeded else final.failure or "error",
                 failure_detail=None if succeeded else final.failure_detail,
                 duration_seconds=round(time.monotonic() - started, 1), review=str(final.output) if succeeded else None,
+                failed_output=next((str(path) for path in (Path(f"{final.output}.failed"), Path(f"{final.output}.invalid"))
+                                    if not succeeded and path.is_file()), None),
                 log=str(final.log), cwd=final.attempts[-1]["cwd"] if final.attempts else os.getcwd(),
                 attempts=final.attempts)
         save_record()
@@ -800,6 +808,7 @@ def run_command(args: argparse.Namespace) -> int:
     except ReviewError as error:
         print(f"Error: {error}", file=sys.stderr)
         record["status"] = "failed"
+        record["error"] = str(error)
     except (SystemExit, KeyboardInterrupt):
         record["status"] = "interrupted"
         raise
@@ -838,7 +847,7 @@ read every active project worktree (outside a project, the current checkout).
 Implementation reviews default to the current entry's expected PR base (stopping when it is
 unreliable, or when a stack child needs a rebase unless --allow-stale-base), else
 refs/remotes/origin/HEAD, else origin/main. Whole per-file diffs are embedded while the whole input
-fits its budget (source first, then data files, then generated, lock and binary files); reviewers
+fits its budget (source, then documentation, then data, then generated, lock and binary); reviewers
 read the rest from diffs/ (diffs/INDEX.txt lists every file) and may read the repository. A failed
 fetch is only a warning.
 

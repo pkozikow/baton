@@ -20,7 +20,7 @@ import time
 import unittest
 import uuid
 
-from baton.review_runner import diff_file_names
+from baton.review_runner import FileDiff, diff_file_names
 from baton.providers import (AGY_REVIEW_NOTE, PROMPT_STDIN, PROVIDERS, ProcessGroups, ReviewRequest, classify_failure,
                              session_variables)
 import provider_fixtures
@@ -397,7 +397,7 @@ class PlanReviewGoldenTest(ReviewRunnerFixture):
         self.assertEqual(reviewers["codex"]["attempts"][0]["reasoning"], "high")
         # agy runs in a private directory that is gone by now; the record says so instead of naming it.
         self.assertEqual((reviewers["agy"]["cwd"], reviewers["agy"]["attempts"][0]["cwd"]), (None, None))
-        self.assertIn("temporary", reviewers["agy"]["attempts"][0]["cwd_note"])
+        self.assertEqual(reviewers["agy"]["attempts"][0]["temporary_cwd"], str(run_dir / "golden-plan-review-agy.work"))
         for name in ("codex", "claude", "agy"):
             self.assertEqual(reviewers[name]["attempts"][0]["process_group"], self.calls(name)[0]["pid"])
         self.assertEqual(reviewers["claude"]["cwd"], str(self.root))
@@ -667,7 +667,11 @@ class PlanReviewGoldenTest(ReviewRunnerFixture):
                 if renamed:
                     self.assertEqual((run_dir / "golden-plan-review-claude.md.failed").read_text(), REVIEW)
                     self.assertFalse(output.exists())
+                    self.assertEqual(self.reviewer(result, "claude")["failed_output"],
+                                     str(run_dir / "golden-plan-review-claude.md.failed"))
                 else:
+                    self.assertIsNone(self.reviewer(result, "claude")["failed_output"])
+                if not renamed:
                     self.assertEqual(output.read_text(), "")
                 if message:
                     self.assertIn(message, result.stderr.splitlines())
@@ -845,6 +849,14 @@ class FailureHandlingTest(ReviewRunnerFixture):
         result = self.plan_review(reviewers="codex,claude")
         self.assertEqual(self.reviewer(result, "codex")["failure"], "error")
 
+    def test_embedding_priority_puts_source_before_docs_data_and_generated_files(self) -> None:
+        cases = {"src/engine.py": 0, "Makefile": 0, "pyproject.toml": 0, "README.md": 1, "docs/guide.rst": 1,
+                 "notes/plan.txt": 1, "LICENSE": 1, "NOTICE.txt": 1, ".gitignore": 1, "MANIFEST.in": 1,
+                 "CHANGELOG.md": 1, "config/app.yaml": 2, "schema.json": 2, "data/rows.csv": 2,
+                 "uv.lock": 3, "vendor/lib.py": 3, "web/app.min.js": 3}
+        self.assertEqual({path: FileDiff("M", path, b"diff --git a/x b/x\n").priority for path in cases}, cases)
+        self.assertEqual(FileDiff("M", "logo.png", b"diff --git a/x b/x\nBinary files differ\n").priority, 3)
+
     def test_diff_file_names_avoid_collisions_and_escapes(self) -> None:
         names = diff_file_names(["a", "a.diff/b", "A.txt", "a.txt", "dir/x", "dir", "../up", "/abs"])
         self.assertEqual(names, {"a": "a.diff", "a.diff/b": "00002-a.diff-b.diff", "A.txt": "A.txt.diff",
@@ -987,8 +999,8 @@ class PeerReviewGoldenTest(ReviewRunnerFixture):
         self.assertIn("rename from old.txt", (diffs / "renamed.txt.diff").read_text())
         record = self.record(result)
         self.assertEqual(record["input"]["not_embedded"], ["core/engine.py"])
-        # Source first, then data files, then lock files.
-        self.assertEqual(record["input"]["embedded"], ["docs/a b.md", "renamed.txt", "small.py", "schema.json",
+        # Source first, then documentation, then data files, then lock files.
+        self.assertEqual(record["input"]["embedded"], ["small.py", "docs/a b.md", "renamed.txt", "schema.json",
                                                        "aaa.lock"])
         combined = run_dir / "feature-review-input.txt"
         self.assertEqual(record["input"]["input_bytes"], combined.stat().st_size)
@@ -1043,6 +1055,12 @@ class PeerReviewGoldenTest(ReviewRunnerFixture):
         self.assertIn("Error: base ref 'no-such-base' does not name a commit in this repository.",
                       result.stderr.splitlines())
         self.assertEqual(self.all_calls(), {})
+        record = self.record(result)
+        self.assertEqual((record["status"], record["error"]),
+                         ("failed", "base ref 'no-such-base' does not name a commit in this repository."))
+        shown = subprocess.run([str(BATON), "review", "show", str(self.run_dir(result))], cwd=self.repo, env=self.env,
+                               text=True, capture_output=True)
+        self.assertIn("Error: base ref 'no-such-base' does not name a commit in this repository.", shown.stdout)
 
     def test_type_changes_and_submodules_keep_one_diff_per_file(self) -> None:
         self.commit({"link": "target\n", "plain.txt": "one\n"})

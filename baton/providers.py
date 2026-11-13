@@ -269,14 +269,18 @@ class ReviewRequest:
         if self.failure is None:
             self.failure, self.failure_detail, self.retryable = reason, detail, retryable
 
-    def begin_attempt(self, session_id: str | None, log: Path, *, temporary_cwd: bool = False,
+    def begin_attempt(self, session_id: str | None, log: Path, *, temporary_cwd: Path | None = None,
                       **details: Any) -> None:
-        """Records an attempt before its CLI starts; ``status`` stays None until it ends."""
+        """Records an attempt before its CLI starts; ``status`` stays None until it ends.
+
+        A ``temporary_cwd`` is a private directory the attempt removes when it ends, so it is recorded apart
+        from ``cwd``.
+        """
         entry: dict[str, Any] = {"session_id": session_id, "log": str(log.absolute()),
                                  "cwd": None if temporary_cwd else str((self.cwd or Path.cwd()).absolute()),
                                  "status": None, **details}
-        if temporary_cwd:
-            entry["cwd_note"] = "a private temporary directory, removed when the attempt ended"
+        if temporary_cwd is not None:
+            entry["temporary_cwd"] = str(temporary_cwd.absolute())
         with self.record_lock or contextlib.nullcontext():
             self.attempts.append(entry)
         self.changed()
@@ -812,7 +816,7 @@ class AgyProvider(Provider):
                 if nested.get("step_type") == "agent_response" and isinstance(nested.get("text_delta"), str):
                     partial.append(nested["text_delta"])
 
-            request.begin_attempt(None, request.log, temporary_cwd=True)
+            request.begin_attempt(None, request.log, temporary_cwd=work)
             with stream_path.open("rb") as events:
                 def observe(*, final: bool = False) -> bool:
                     nonlocal result, encoded, pending, failure
