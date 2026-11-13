@@ -144,6 +144,14 @@ started (otherwise it only says the group may still exist); nothing stops them
 automatically.
 `--json` prints the record with its effective status and those process groups.
 
+Each agy attempt also records `progress`: completed tool calls, when the last one
+finished (seconds after launch, as the runner read the stream), the seconds elapsed,
+the bytes of review text streamed (what became the `.md` or `.md.failed`) and, when
+agy reports them, input and output tokens. `show` prints it on one line. A timeout
+with a recent last tool call and no review text was still reading; one with review
+text was writing when it was stopped. The record is rewritten after every tool call,
+so a killed run keeps recent numbers. Codex and Claude attempts record none.
+
 Reopening a reviewer session interactively first asks to trust its folder in
 Claude and agy. agy completion is not reliable on large inputs: in replays it
 finished 4 of 7 plan reviews within 420 seconds and 1 of 5 large implementation

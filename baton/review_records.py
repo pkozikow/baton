@@ -325,6 +325,9 @@ def show(run: str, selector: str | None, as_json: bool) -> int:
             ended = "unfinished" if attempt.get("status") is None else f"exit {attempt['status']}"
             print(f"    attempt {index}: {reviewer.get('provider')} session {attempt.get('session_id') or 'unknown'}, "
                   f"cwd {cwd}, {ended}{details}" + (" [accepted]" if attempt.get("accepted") else ""))
+            progress = attempt.get("progress")
+            if isinstance(progress, dict):
+                print("      progress: " + progress_line(progress, reviewer.get("timeout_seconds")))
     for provider, group, confirmed in live_groups(record):
         if confirmed:
             print(f"Warning: {provider} reviewer process group {group} is still running after its runner stopped; "
@@ -335,6 +338,20 @@ def show(run: str, selector: str | None, as_json: bool) -> int:
     if any(attempt.get("session_id") for reviewer in record["reviewers"] for attempt in reviewer.get("attempts") or []):
         print(SESSION_WARNING)
     return 0
+
+
+def progress_line(progress: dict[str, Any], timeout: Any) -> str:
+    """How far an attempt got, for example ``71 tool calls, last at 407s; 420s elapsed of a 420s timeout``."""
+    calls = progress.get("tool_calls") or 0
+    parts = [f"{calls} tool call{'' if calls == 1 else 's'}"
+             + (f", last at {progress['last_tool_call_seconds']}s" if progress.get("last_tool_call_seconds") is not None
+                else "")]
+    if progress.get("elapsed_seconds") is not None:
+        parts.append(f"{progress['elapsed_seconds']}s elapsed" + (f" of a {timeout}s timeout" if timeout else ""))
+    parts.append(f"{progress.get('review_bytes') or 0} B of review text")
+    if progress.get("input_tokens") is not None:
+        parts.append(f"{progress['input_tokens']} input / {progress.get('output_tokens')} output tokens")
+    return "; ".join(parts)
 
 
 def live_groups(record: dict[str, Any]) -> list[tuple[str, int, bool]]:

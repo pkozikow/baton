@@ -808,6 +808,7 @@ class AgyProvider(Provider):
         shutil.rmtree(work, ignore_errors=True)
         work.mkdir()
         status = 1
+        started = time.monotonic()
         try:
             status = self._run_review(request, work)
             return status
@@ -815,7 +816,11 @@ class AgyProvider(Provider):
             shutil.rmtree(work, ignore_errors=True)
             if request.attempts and request.attempts[-1].get("status") is None:
                 conversation = request.attempts[-1].get("session_id") or _agy_stream_facts(self.stream_path(request))[0]
-                request.update_attempt(status=status, session_id=conversation)
+                # The output holds the review or, after a timeout, the text streamed so far.
+                written = request.output.stat().st_size if request.output.is_file() else 0
+                progress = {**(request.attempts[-1].get("progress") or {}), "review_bytes": written,
+                            "elapsed_seconds": round(time.monotonic() - started, 1)}
+                request.update_attempt(status=status, session_id=conversation, progress=progress)
 
     def _run_review(self, request: ReviewRequest, work: Path) -> int:
         stem = str(request.log.absolute()).removesuffix(".log")
@@ -844,6 +849,10 @@ class AgyProvider(Provider):
             failure = "invalid_output"
             # The review text streamed so far, kept as failure evidence if agy never finishes.
             partial: list[str] = []
+            # How far the attempt got, so a timeout while writing can be told from one while still reading. Stream
+            # lines carry no timestamps, so times are when the runner read the line (polled every 0.05 s).
+            progress: dict[str, Any] = {"tool_calls": 0, "last_tool_call_seconds": None, "review_bytes": 0}
+            launched = time.monotonic()
 
             def note(event: dict[str, Any]) -> None:
                 kind = event.get("event")
@@ -854,8 +863,20 @@ class AgyProvider(Provider):
                     request.update_attempt(session_id=conversation)
                 if nested.get("step_type") == "agent_response" and isinstance(nested.get("text_delta"), str):
                     partial.append(nested["text_delta"])
+                    progress["review_bytes"] += len(nested["text_delta"].encode("utf-8"))
+                if nested.get("step_type") == "tool" and nested.get("state") == "DONE":
+                    progress["tool_calls"] += 1
+                    progress["last_tool_call_seconds"] = round(time.monotonic() - launched, 1)
+                    # Written per tool step (not per text chunk), so even a killed runner leaves recent numbers.
+                    request.update_attempt(progress=dict(progress))
+                usage = nested.get("usage")
+                if kind == "result" and isinstance(usage, dict):
+                    for key in ("input_tokens", "output_tokens"):
+                        if isinstance(usage.get(key), int):
+                            progress[key] = usage[key]
+                    request.update_attempt(progress=dict(progress))
 
-            request.begin_attempt(None, request.log, temporary_cwd=work)
+            request.begin_attempt(None, request.log, temporary_cwd=work, progress=dict(progress))
             with stream_path.open("rb") as events:
                 def observe(*, final: bool = False) -> bool:
                     nonlocal result, encoded, pending, failure

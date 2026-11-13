@@ -82,6 +82,28 @@ if name == "agy":
             raise SystemExit(1)
         signal.signal(signal.SIGTERM, stopped)
         time.sleep(60)
+    if behavior.startswith("tools_"):
+        def tool(index):
+            for state in ("ACTIVE", "DONE"):
+                print(json.dumps({"event": "step_update", "step_update": {
+                    "step_index": index, "state": state, "step_type": "tool", "tool_name": "read_file"}}), flush=True)
+            time.sleep(0.1)
+        def text(delta):
+            print(json.dumps({"event": "step_update", "step_update": {
+                "state": "ACTIVE", "step_type": "agent_response", "text_delta": delta}}), flush=True)
+        for index in range({"tools_ok": 3, "tools_reading_hang": 2, "tools_writing_hang": 1}[behavior]):
+            tool(index)
+        if behavior == "tools_ok":
+            for delta in (review[:20], review[20:]):
+                text(delta)
+            print(json.dumps({"event": "result", "result": {"status": "SUCCESS", "response": review,
+                                                            "usage": {"input_tokens": 1234, "output_tokens": 56}}}),
+                  flush=True)
+            raise SystemExit(0)
+        if behavior == "tools_writing_hang":
+            text("## Summary\nHalf a ")
+            text("review")
+        time.sleep(60)
     if behavior in ("partial_hang", "stalled_hang"):
         print(json.dumps({"event": "step_update", "step_update": {"step_type": "agent_response",
                                                                   "text_delta": "## Summary\nPartial "}}), flush=True)
@@ -840,6 +862,45 @@ class FailureHandlingTest(ReviewRunnerFixture):
         result = self.plan_review(reviewers="agy,claude")
         entry = self.reviewer(result, "agy")
         self.assertEqual((entry["failure"], entry["failure_detail"]), ("timeout", "stream stalled upstream"))
+
+    def test_agy_attempts_record_how_far_they_got(self) -> None:
+        def progress(result: subprocess.CompletedProcess[str]) -> dict:
+            return self.reviewer(result, "agy")["attempts"][0]["progress"]
+
+        self.env["STUB_AGY"] = "tools_ok"
+        result = self.plan_review(reviewers="agy")
+        done = progress(result)
+        self.assertEqual({key: done[key] for key in ("tool_calls", "review_bytes", "input_tokens", "output_tokens")},
+                         {"tool_calls": 3, "review_bytes": len(REVIEW), "input_tokens": 1234, "output_tokens": 56})
+        self.assertLessEqual(done["last_tool_call_seconds"], done["elapsed_seconds"])
+
+        # No tool steps at all.
+        self.env["STUB_AGY"] = "ok"
+        done = progress(self.plan_review(reviewers="agy"))
+        self.assertEqual((done["tool_calls"], done["last_tool_call_seconds"], done["review_bytes"]),
+                         (0, None, len(REVIEW)))
+
+        # A timeout while still reading: tool steps, no review text.
+        self.env.update(STUB_AGY="tools_reading_hang", PLAN_REVIEW_AGY_TIMEOUT_SECS="3")
+        result = self.plan_review(reviewers="agy,claude")
+        reading = progress(result)
+        self.assertEqual((reading["tool_calls"], reading["review_bytes"]), (2, 0))
+        self.assertGreaterEqual(reading["elapsed_seconds"], 2.5)
+        self.assertLess(reading["last_tool_call_seconds"], reading["elapsed_seconds"])
+        run_dir = self.run_dir(result)
+        self.assertFalse((run_dir / "golden-plan-review-agy.md.failed").exists())
+        shown = subprocess.run([str(BATON), "review", "show", str(run_dir)], cwd=self.root, env=self.env, text=True,
+                               capture_output=True).stdout.splitlines()
+        self.assertIn(f"      progress: 2 tool calls, last at {reading['last_tool_call_seconds']}s; "
+                      f"{reading['elapsed_seconds']}s elapsed of a 3s timeout; 0 B of review text", shown)
+
+        # A timeout while writing: the partial review text is counted and kept.
+        self.env["STUB_AGY"] = "tools_writing_hang"
+        result = self.plan_review(reviewers="agy,claude")
+        writing = progress(result)
+        failed = self.run_dir(result) / "golden-plan-review-agy.md.failed"
+        self.assertEqual(failed.read_text(), "## Summary\nHalf a review")
+        self.assertEqual((writing["tool_calls"], writing["review_bytes"]), (1, failed.stat().st_size))
 
     def test_codex_timeout_keeps_the_timed_out_attempts_log_without_fallback(self) -> None:
         self.env.update(STUB_CODEX="hang", PLAN_REVIEW_CODEX_TIMEOUT_SECS="2")

@@ -29,6 +29,11 @@ Initial public release.
   every MCP server `codex mcp list` reports as enabled, and record which ones in the
   run record. Claude reviewers already load none (`--strict-mcp-config`).
 
+- agy review attempts record their progress (tool calls, time of the last one,
+  elapsed time, review text streamed, token totals) in the run record, and
+  `baton review show` prints it, so a timeout while writing can be told from one
+  while still reading.
+
 - `baton config set` removes model entries and tier mappings with repeatable
   `--remove-plan-review-model`, `--remove-implementation-review-model`,
   `--remove-worker-model` (each `PROVIDER`) and `--remove-model-tier
