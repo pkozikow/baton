@@ -19,6 +19,9 @@ import test_project_manager as fixtures  # noqa: E402
 FAKE_CODEX = '''#!/usr/bin/env python3
 import json, os, pathlib, sys
 args = sys.argv[1:]
+if args[-3:] == ["mcp", "list", "--json"]:
+    print("[]")
+    raise SystemExit(0)
 with open(os.environ["REVIEW_TEST_CALLS"], "a") as handle:
     handle.write(json.dumps(args) + "\\n")
 assert "Changes to review:" in sys.stdin.read()

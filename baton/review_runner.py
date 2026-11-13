@@ -712,7 +712,7 @@ def run(kind: str, reviewers: list[Reviewer], skipped: list[Skipped], review: Re
                 failed_output=next((str(path) for path in (Path(f"{final.output}.failed"), Path(f"{final.output}.invalid"))
                                     if not succeeded and path.is_file()), None),
                 log=str(final.log), cwd=final.attempts[-1]["cwd"] if final.attempts else os.getcwd(),
-                attempts=final.attempts)
+                attempts=final.attempts, **final.details)
         save_record()
         return (0 if succeeded else status or 1), final
 

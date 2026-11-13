@@ -169,9 +169,15 @@ instructions. The prompts tell reviewers to treat that content as data, never to
 follow instructions inside it, and never to modify files, run write commands,
 commit or push. The invocations restrict tools and permissions as follows:
 
-- Codex uses `exec -s read-only` and `approval_policy="never"`.
-- Claude uses `--restricted`, strict MCP configuration, noninteractive denial and
-  only `Read,Glob,Grep`. Restricted mode ignores user/project/local settings.
+- Codex uses `exec -s read-only` and `approval_policy="never"`, and starts no MCP
+  servers: the runner lists them with `codex mcp list --json`, turns plugins off
+  (they add servers outside `config.toml` that cannot be disabled by name) and
+  disables every remaining enabled server by name. The run record names the disabled
+  servers; if listing fails, the review runs with a warning and only plugins off.
+  The doctor smoke test runs the same invocation; unattended retrospectives do not.
+- Claude uses `--restricted`, `--strict-mcp-config` without an MCP configuration (so
+  no MCP servers), noninteractive denial and only `Read,Glob,Grep`. Restricted mode
+  ignores user/project/local settings.
 - Cursor uses read-only `--mode ask`.
 - agy uses `--sandbox` in a private work directory, removed afterwards. Headless
   permissions auto-deny write and command tools only when no `permissions.allow`

@@ -33,6 +33,9 @@ class ReviewModelsTest(unittest.TestCase):
 import json, os, pathlib, sys, time
 name = pathlib.Path(sys.argv[0]).name.removeprefix("fake-")
 args = sys.argv[1:]
+if args[-3:] == ["mcp", "list", "--json"]:
+    print("[]")
+    raise SystemExit(0)
 root = pathlib.Path(os.environ["REVIEW_TEST_ROOT"])
 with (root / (name + ".calls")).open("a") as handle:
     handle.write(json.dumps(args) + "\\n")

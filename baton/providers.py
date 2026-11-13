@@ -260,6 +260,8 @@ class ReviewRequest:
     on_change: Callable[[], None] | None = None
     # Guards ``attempts`` while another thread serializes the run record.
     record_lock: Any = None
+    # Provider facts the run record keeps for this reviewer, such as the MCP servers Codex was told not to start.
+    details: dict[str, Any] = field(default_factory=dict)
 
     def remaining(self) -> float:
         return self.timeout if self.deadline is None else max(0.0, self.deadline - time.monotonic())
@@ -556,6 +558,40 @@ class CodexProvider(Provider):
     def review_output(self, prefix: str, model: str) -> Path:
         return Path(f"{prefix}-{self.name}-{slugify(model)}.md")
 
+    def mcp_overrides(self, request: ReviewRequest) -> list[str]:
+        """``--config`` pairs that disable every MCP server Codex would start, so a reviewer gets none.
+
+        Plugins add MCP servers outside config.toml that a per-server override cannot address (Codex then
+        reports an invalid transport), so plugins are turned off. An empty ``mcp_servers`` table does not
+        replace the configured servers (overrides merge), so each remaining enabled server is disabled by name.
+        Codex splits override keys on dots and does not unquote them, so a name outside ``[A-Za-z0-9_-]``
+        cannot be disabled. Listing problems leave the review running with a warning.
+        """
+        limit = min(MCP_LIST_TIMEOUT_SECS, max(1.0, request.remaining()))
+        try:
+            listed = subprocess.run([request.executable, *CODEX_NO_PLUGINS, "mcp", "list", "--json"],
+                                    stdin=subprocess.DEVNULL,
+                                    capture_output=True, text=True, env=scrubbed_environment(), timeout=limit)
+            servers = json.loads(listed.stdout) if listed.returncode == 0 else None
+            if not isinstance(servers, list) or not all(isinstance(server, dict) for server in servers):
+                raise ValueError(f"exit {listed.returncode}, unexpected output" if listed.returncode == 0
+                                 else f"exit {listed.returncode}: {(listed.stderr.strip().splitlines() or [''])[-1]}")
+        except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+            reason = f"timed out after {_seconds(math.ceil(limit))}s" if isinstance(error, subprocess.TimeoutExpired) \
+                else str(error)
+            request.say(f"Warning: cannot list {self.name}'s MCP servers ({reason}); the review runs with the "
+                        "user's enabled MCP servers from config.toml.")
+            request.details["mcp_servers"] = {"listing_error": reason[:300]}
+            return list(CODEX_NO_PLUGINS)
+        enabled = [server.get("name") for server in servers if server.get("enabled") is True]
+        disabled = [name for name in enabled if isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9_-]+", name)]
+        kept = [str(name) for name in enabled if name not in disabled]
+        if kept:
+            request.say(f"Warning: cannot disable {self.name} MCP servers whose names a --config key cannot "
+                        f"express: {', '.join(kept)}.")
+        request.details["mcp_servers"] = {"disabled": disabled, **({"not_disabled": kept} if kept else {})}
+        return [*CODEX_NO_PLUGINS, *(value for name in disabled for value in ("--config", f"mcp_servers.{name}.enabled=false"))]
+
     def error_lines(self, request: ReviewRequest) -> list[str]:
         # The log echoes the prompt and the reviewed text, so only Codex's own error lines count: error-like lines
         # that do not also appear in that input.
@@ -578,6 +614,7 @@ class CodexProvider(Provider):
             request.say(f"Error: {self.name} timed out after {_seconds(request.timeout)}s.")
             request.fail("timeout")
             return 124
+        no_mcp = self.mcp_overrides(request)
         for index, effort in enumerate(candidates):
             # The reviewer's failure is the last attempt's.
             request.failure = request.failure_detail = None
@@ -587,7 +624,7 @@ class CodexProvider(Provider):
             # Reviewers read untrusted diffs and plans, so they get a read-only sandbox and an explicit
             # never policy: without one, exec inherits the user's sandbox and (possibly auto-reviewed) approvals.
             command = [request.executable, "exec", *model, "--config", f'model_reasoning_effort="{effort}"',
-                       "--config", 'approval_policy="never"', "-s", "read-only", "--skip-git-repo-check",
+                       "--config", 'approval_policy="never"', *no_mcp, "-s", "read-only", "--skip-git-repo-check",
                        "--output-last-message", str(request.output), "--color", "never", "-"]
             request.begin_attempt(None, attempt_log, reasoning=effort)
 
@@ -650,6 +687,8 @@ class CodexProvider(Provider):
 
 
 CODEX_REASONING = ("minimal", "low", "medium", "high")
+MCP_LIST_TIMEOUT_SECS = 10
+CODEX_NO_PLUGINS = ("--config", "features.plugins=false")
 CODEX_SESSION = re.compile(r"^session id:\s*(\S+)\s*$", re.MULTILINE)
 
 

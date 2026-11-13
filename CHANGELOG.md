@@ -25,6 +25,10 @@ Initial public release.
   failures as a coverage blocker, and passes earlier rejected findings to later
   rounds.
 
+- Codex reviewers start no MCP servers: reviews turn Codex plugins off and disable
+  every MCP server `codex mcp list` reports as enabled, and record which ones in the
+  run record. Claude reviewers already load none (`--strict-mcp-config`).
+
 - `baton config set` removes model entries and tier mappings with repeatable
   `--remove-plan-review-model`, `--remove-implementation-review-model`,
   `--remove-worker-model` (each `PROVIDER`) and `--remove-model-tier

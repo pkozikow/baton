@@ -41,6 +41,17 @@ name = pathlib.Path(sys.argv[0]).name.removeprefix("fake-")
 args = sys.argv[1:]
 stdin = sys.stdin.buffer.read().decode("utf-8", errors="replace")
 root = pathlib.Path(os.environ["REVIEW_TEST_ROOT"])
+if args[-3:] == ["mcp", "list", "--json"]:
+    with (root / (name + ".mcp")).open("a") as handle:
+        handle.write(json.dumps({"args": args, "stdin": stdin}) + "\n")
+    listing = os.environ.get("STUB_MCP", "[]")
+    if listing == "fail":
+        print("Error: config broken", file=sys.stderr)
+        raise SystemExit(2)
+    if listing == "hang":
+        time.sleep(60)
+    print(listing)
+    raise SystemExit(0)
 with (root / (name + ".calls")).open("a") as handle:
     handle.write(json.dumps({"args": args, "stdin": stdin, "pid": os.getpid(), "ppid": os.getppid(), "cwd": os.getcwd(),
                              "cwd_files": sorted(os.listdir()),
@@ -339,7 +350,7 @@ class PlanReviewGoldenTest(ReviewRunnerFixture):
         calls = self.all_calls()
         self.assertEqual(calls["codex"][0]["args"], [
             "exec", "--config", 'model_reasoning_effort="high"', "--config", 'approval_policy="never"',
-            "-s", "read-only", "--skip-git-repo-check",
+            "--config", "features.plugins=false", "-s", "read-only", "--skip-git-repo-check",
             "--output-last-message", outputs["codex"], "--color", "never", "-"])
         self.assertEqual(calls["codex"][0]["stdin"], combined_text)
         # --tools is variadic: the prompt must stay after "--" so it is not taken as a tool name.
@@ -868,6 +879,53 @@ class FailureHandlingTest(ReviewRunnerFixture):
         self.assertEqual(len(set(map(str.casefold, names.values()))), 4)
         self.assertEqual(names["x" * 250], "00004-" + "x" * 150 + ".diff")
 
+    def test_codex_reviewers_start_no_enabled_mcp_server(self) -> None:
+        servers = [{"name": "context7", "enabled": True}, {"name": "computer-use", "enabled": True},
+                   {"name": "already_off", "enabled": False}, {"name": "odd.name", "enabled": True}]
+        self.env["STUB_MCP"] = json.dumps(servers)
+        result = self.plan_review(reviewers="codex")
+        self.assertEqual([json.loads(line) for line in (self.root / "codex.mcp").read_text().splitlines()],
+                         [{"args": ["--config", "features.plugins=false", "mcp", "list", "--json"], "stdin": ""}])
+        args = self.calls("codex")[0]["args"]
+        overrides = [args[index + 1] for index, value in enumerate(args)
+                     if value == "--config" and args[index + 1].startswith(("mcp_servers.", "features."))]
+        self.assertEqual(overrides, ["features.plugins=false", "mcp_servers.context7.enabled=false",
+                                     "mcp_servers.computer-use.enabled=false"])
+        self.assertIn("Warning: cannot disable codex MCP servers whose names a --config key cannot express: "
+                      "odd.name.", result.stderr.splitlines())
+        self.assertEqual(self.reviewer(result, "codex")["mcp_servers"],
+                         {"disabled": ["context7", "computer-use"], "not_disabled": ["odd.name"]})
+
+        (self.root / "codex.calls").unlink()
+        self.env["STUB_MCP"] = json.dumps([{"name": "already_off", "enabled": False}])
+        result = self.plan_review(reviewers="codex")
+        self.assertFalse([value for value in self.calls("codex")[0]["args"] if value.startswith("mcp_servers.")])
+        self.assertEqual(self.reviewer(result, "codex")["mcp_servers"], {"disabled": []})
+
+    def test_codex_mcp_listing_problems_only_warn(self) -> None:
+        self.env["PLAN_REVIEW_CODEX_TIMEOUT_SECS"] = "30"
+        for listing, reason in (("fail", "exit 2: Error: config broken"), ("not json", "Expecting value"),
+                                ('{"name": "x"}', "unexpected output"), ("hang", "timed out after 10s")):
+            with self.subTest(listing=listing):
+                self.env["STUB_MCP"] = listing
+                (self.root / "codex.calls").unlink(missing_ok=True)
+                result = self.plan_review(reviewers="codex")
+                entry = self.reviewer(result, "codex")
+                self.assertEqual(entry["status"], "succeeded")
+                self.assertIn(reason, entry["mcp_servers"]["listing_error"])
+                self.assertIn("Warning: cannot list codex's MCP servers (", result.stderr)
+                self.assertIn("the review runs with the user's enabled MCP servers from config.toml.", result.stderr)
+                args = self.calls("codex")[0]["args"]
+                self.assertFalse([value for value in args if value.startswith("mcp_servers.")])
+                self.assertIn("features.plugins=false", args)
+
+    def test_claude_reviewers_load_no_mcp_configuration(self) -> None:
+        # --strict-mcp-config without --mcp-config gives Claude no MCP servers at all.
+        self.plan_review(reviewers="claude")
+        args = self.calls("claude")[0]["args"]
+        self.assertIn("--strict-mcp-config", args)
+        self.assertNotIn("--mcp-config", args)
+
     def test_classification(self) -> None:
         cases = (
             (124, [], ("timeout", None, False)),
@@ -1393,7 +1451,7 @@ class ProviderReviewTest(ReviewRunnerFixture):
                     args = self.calls(name)[-1]["args"]
                     self.assertFalse([value for value in args
                                       if value in bypass or value.startswith("--dangerously")], args)
-        self.assertEqual(self.calls("codex")[-1]["args"][7:9], ["-s", "read-only"])
+        self.assertEqual(self.calls("codex")[-1]["args"][9:11], ["-s", "read-only"])
         # Codex's --add-dir grants writes; its read-only sandbox already reads any path.
         self.assertNotIn("--add-dir", self.calls("codex")[-1]["args"])
         session = self.calls("claude")[-1]["args"][len(CLAUDE_REVIEW_ARGS) + 1]
