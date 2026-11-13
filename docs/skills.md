@@ -76,26 +76,34 @@ from the evidence it has instead of running out of time.
 
 The branch is the unit of an implementation review. The run writes the full diff
 and one diff per changed file under `<run-dir>/diffs/` (the file's path plus
-`.diff`). The prompt names the base, merge base and head commits and lists every
-changed file with its diff size; it embeds whole per-file diffs up to
-`PEER_REVIEW_MAX_DIFF_BYTES`, generated, lock and binary files last, and reviewers
-open the rest, and the surrounding code, on demand: they may read the repository
-and the diffs directory. The record and the stderr warning list the files that were
-not embedded; executors report whether reviewers read them. A failed `git fetch`
-(for example in a restricted sandbox) is a recorded warning, and the review uses
-the local base.
+`.diff`), with `diffs/INDEX.txt` listing every changed file, its diff size and
+whether it was embedded. The prompt names the base, merge base and head commits and
+lists the changed files (a list too long for the input is summarized by directory
+and points to the index). `PEER_REVIEW_MAX_INPUT_BYTES` (default 180,000) bounds the
+whole reviewer input: prompt, listing and embedded diffs. Whole per-file diffs are
+embedded while they fit, source first, then data and schema files (YAML, JSON, CSV,
+XML, snapshots), then generated, lock and binary files. The default stays below the
+size at which agy silently drops the rest of its message (about 191,000 bytes), and
+every provider gets the same input. Reviewers open the other diffs, and the
+surrounding code, on demand: they may read the repository and the diffs directory.
+The record lists what was and was not embedded, and the stderr warning names the
+index; executors report whether reviewers read the non-embedded diffs. A failed
+`git fetch` (for example in a restricted sandbox) is a recorded warning, and the
+review uses the local base; a base ref that names no commit stops the run.
 
 A failed reviewer is classified as `timeout`, `rate_limited`, `auth`,
 `startup_denied`, `invalid_output`, `empty`, `missing_cli` or `error` from its exit
 status and its log or stream; agy's error payload is kept, so a rate limit that ran
-into the deadline is reported as `rate_limited`. A rate-limited reviewer, or one
+into the deadline is reported as `rate_limited`, and another stream error stays as
+the timeout's detail. A rate-limited reviewer, or one
 that hit a transient server or network error, is retried once after a short
 backoff within its own timeout; timeouts, `auth`, `missing_cli` and
 `startup_denied` are not retried. Codex's lower-reasoning fallbacks share the
 reviewer's timeout, and the log of an attempt that timed out is kept. A failed
-nonempty report is kept as `.md.failed`, and an agy report without a successful,
-valid terminal response as `.md.invalid`. The run prints its maximum duration up
-front.
+nonempty report is kept as `.md.failed`, including the review text agy streamed
+before it timed out or was interrupted, and an agy report without a successful,
+valid terminal response as `.md.invalid`. The run prints its maximum duration once
+its input is ready.
 
 Codex needs write access to its CLI state directory even for read-only reviews. When
 the host agent blocks it, the executor requests an approved launch; see the
@@ -111,10 +119,13 @@ which in a subagent may be its parent's), what was reviewed (plan path, or
 repository, branch, base, merge base and head commits, embedded and non-embedded
 files), warnings, and per reviewer the provider, model, outcome, failure reason,
 duration, review, log and working directory, with one entry per attempt carrying
-its session ID. Each Codex fallback and each retry is a separate attempt; the
-accepted one is marked. Claude reviewers get a fresh session ID per attempt, Codex
-reports its own in its log and agy in its stream; Cursor exposes none. Command lines
-and prompts are not recorded.
+its session ID and process group. An attempt is recorded when it starts and its
+session ID as soon as it is known, so a killed run still names its sessions. Each
+Codex fallback and each retry is a separate attempt; the accepted one is marked.
+Claude reviewers get a fresh session ID per attempt, Codex reports its own in its
+log and agy in its stream; Cursor exposes none. agy runs in a private temporary
+directory, so its working directory is recorded as temporary rather than as a path.
+Command lines and prompts are not recorded.
 
 `baton review show RUN` (a run ID, run directory or `run.json`) prints the record,
 marking paths that no longer exist, and each attempt's provider, session ID and
@@ -122,13 +133,23 @@ working directory, so a reviewer session can be reopened with that provider's ow
 CLI. Reviewer sessions hold the untrusted diff or plan text they reviewed. A
 `running` record whose runner process is gone, or whose PID now belongs to another
 process, is shown as `interrupted`; this is how a dispatcher confirms that a
-backgrounded run finished. `--json` prints the record with its effective status.
+backgrounded run finished. A runner killed outright (SIGKILL) cannot stop its
+reviewers, so `show` names each reviewer process group of an interrupted run that is
+still alive, with the command to stop it; nothing stops them automatically.
+`--json` prints the record with its effective status and those process groups.
+
+Reopening a reviewer session interactively first asks to trust its folder in
+Claude and agy. agy completion is not reliable on large inputs: in replays it
+finished 4 of 7 plan reviews within 420 seconds and 1 of 5 large implementation
+reviews within 300 seconds, using most of its timeout even when it finished.
 
 `baton review save RUN_DIR [--selector PROJECT]` is a separate, trusted step: it
 copies a finished run's `run.json` and review files (`.md`, `.md.failed`,
 `.md.invalid`) once into the project's artifacts at `reviews/<run-id>/` and commits
 them like `baton artifacts commit`. It refuses a run that is still running or that
-belongs to another project; saving again is a no-op that retries the commit.
+belongs to another project, and checks the artifact checkout before copying
+anything; a failed save leaves no copy behind. Saving again is a no-op that retries
+the commit; an uncommitted copy left by a failed save is replaced.
 Outside a project there is nothing to save (exit 3). Prompts, diffs and logs stay in
 the temporary run directory. `baton review list [--selector PROJECT] [--json]` lists
 the project's saved runs and its unsaved runs still in `$TMPDIR` (outside a project,

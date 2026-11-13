@@ -13,8 +13,10 @@ Initial public release.
   failure reason and per-attempt session IDs; `baton review show` and `list` find
   and inspect runs (a run whose runner died shows as `interrupted`), and the
   trusted `baton review save` copies a finished run into the project's artifacts.
-  Implementation reviews embed whole per-file diffs up to the size limit and let
-  reviewers read the rest and the repository on demand, instead of cutting the diff;
+  Implementation reviews embed whole per-file diffs while the whole input fits
+  `PEER_REVIEW_MAX_INPUT_BYTES` (default 180,000; it replaces
+  `PEER_REVIEW_MAX_DIFF_BYTES`) and let reviewers read the rest, listed in
+  `diffs/INDEX.txt`, and the repository on demand, instead of cutting the diff;
   prompts state an inspection budget and deadline; rate limits and transient errors
   are retried once within the reviewer's timeout; failures are classified rather
   than reported as `unavailable`; Codex fallbacks share one deadline and keep the

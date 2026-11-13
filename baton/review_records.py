@@ -18,7 +18,7 @@ import sys
 from typing import Any
 
 from .errors import NoProject, ProjectError
-from .gitutil import write_json
+from .gitutil import git, write_json
 
 RECORD = "run.json"
 RUN_ID = re.compile(r"\d{8}T\d{6}Z-(plan|implementation)-[a-z0-9_]+")
@@ -166,17 +166,29 @@ def save(run_dir: Path, selector: str | None) -> int:
     if owner.get("uuid") not in (None, project["uuid"]):
         raise ProjectError(f"Review run {record['id']} belongs to project {owner.get('name')} ({owner['uuid']}), "
                            f"not {project['name']}.")
-    saved_root = _saved_root(manager, project)
-    assert saved_root is not None
+    # Check what the commit will check before copying anything, so a refused save leaves nothing behind.
+    directory = manager.artifact_directory(project)
+    if directory.is_symlink() or not directory.is_dir():
+        raise ProjectError(f"Unsafe project artifacts directory: {directory}")
+    root = manager.artifacts_git(directory)
+    manager.artifact_checkout(root, [])
+    saved_root = directory / "reviews"
+    if saved_root.is_symlink() or (saved_root.exists() and not saved_root.is_dir()):
+        raise ProjectError(f"Unsafe review runs directory: {saved_root}")
     destination = saved_root / record["id"]
     files = sorted(path for path in run_dir.iterdir()
                    if path.is_file() and not path.is_symlink() and path.name.endswith(REVIEW_SUFFIXES))
-    saved_record = record
-    if destination.exists():
+    tracked = destination.is_dir() and bool(git(root, "--literal-pathspecs", "ls-files", "--",
+                                                 str(destination / RECORD), check=False))
+    if destination.exists() and not tracked:
+        # Left by an earlier save whose commit failed: copy it again rather than trust it.
+        shutil.rmtree(destination)
+    created = not destination.exists()
+    if not created:
         previous = read_record(destination / RECORD)
-        if previous != saved_record or any(not (destination / path.name).is_file()
-                                           or not filecmp.cmp(path, destination / path.name, shallow=False)
-                                           for path in files):
+        if previous != record or any(not (destination / path.name).is_file()
+                                     or not filecmp.cmp(path, destination / path.name, shallow=False)
+                                     for path in files):
             raise ProjectError(f"{destination} already holds a different copy of review run {record['id']}.")
         print(f"Review run {record['id']} is already saved in {destination}.")
     else:
@@ -186,13 +198,18 @@ def save(run_dir: Path, selector: str | None) -> int:
         try:
             for path in files:
                 shutil.copyfile(path, staging / path.name)
-            write_record(staging, saved_record)
+            write_record(staging, record)
             staging.replace(destination)
         finally:
             shutil.rmtree(staging, ignore_errors=True)
     paths = [str(destination / RECORD), *(str(destination / path.name) for path in files)]
-    # Committing again after an interrupted save retries the commit; an unchanged copy commits nothing.
-    manager.commit_artifacts(project, f"Save {record.get('kind')} review run {record['id']}", paths)
+    try:
+        # Committing an already saved copy commits nothing but retries an earlier failed push.
+        manager.commit_artifacts(project, f"Save {record.get('kind')} review run {record['id']}", paths)
+    except BaseException:
+        if created:
+            shutil.rmtree(destination, ignore_errors=True)
+        raise
     print(f"Saved review run {record['id']} to {destination}")
     return 0
 
@@ -252,8 +269,9 @@ def show(run: str, selector: str | None, as_json: bool) -> int:
     record = effective_record(directory / RECORD)
     status = record["status"]
     if as_json:
-        print(json.dumps({**record, "recorded_status": recorded.get("status"),
-                          "record_path": str(directory / RECORD)}, indent=2))
+        print(json.dumps({**record, "recorded_status": recorded.get("status"), "record_path": str(directory / RECORD),
+                          "live_process_groups": [{"provider": provider, "process_group": group}
+                                                  for provider, group in live_groups(record)]}, indent=2))
         return 0
     copy = directory if saved else None
     kind = str(record.get("kind")) + (f", focus {record['focus']}" if record.get("focus") else "")
@@ -293,9 +311,35 @@ def show(run: str, selector: str | None, as_json: bool) -> int:
             print(f"    log: {_path(reviewer['log'])}")
         for index, attempt in enumerate(reviewer.get("attempts") or [], 1):
             details = "".join(f", {key} {attempt[key]}" for key in ("reasoning",) if attempt.get(key))
+            cwd = _path(attempt["cwd"]) if attempt.get("cwd") else f"temporary ({attempt.get('cwd_note') or 'removed'})"
+            ended = "unfinished" if attempt.get("status") is None else f"exit {attempt['status']}"
             print(f"    attempt {index}: {reviewer.get('provider')} session {attempt.get('session_id') or 'unknown'}, "
-                  f"cwd {_path(attempt.get('cwd'))}, exit {attempt.get('status')}{details}"
-                  + (" [accepted]" if attempt.get("accepted") else ""))
+                  f"cwd {cwd}, {ended}{details}" + (" [accepted]" if attempt.get("accepted") else ""))
+    for provider, group in live_groups(record):
+        print(f"Warning: {provider} reviewer process group {group} is still running after its runner stopped; "
+              f"stop it with: kill -TERM -{group}")
     if any(attempt.get("session_id") for reviewer in record["reviewers"] for attempt in reviewer.get("attempts") or []):
         print(SESSION_WARNING)
     return 0
+
+
+def live_groups(record: dict[str, Any]) -> list[tuple[str, int]]:
+    """Reviewer process groups of an interrupted run's unfinished attempts that still exist.
+
+    The runner kills its reviewers when it is stopped by a signal, but not when it is killed outright.
+    """
+    if record.get("status") != "interrupted":
+        return []
+    groups = []
+    for reviewer in record["reviewers"]:
+        for attempt in reviewer.get("attempts") or []:
+            group = attempt.get("process_group")
+            if attempt.get("status") is None and type(group) is int and group > 0:
+                try:
+                    os.killpg(group, 0)
+                except ProcessLookupError:
+                    continue
+                except PermissionError:
+                    pass
+                groups.append((str(reviewer.get("provider")), group))
+    return groups

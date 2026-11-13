@@ -55,6 +55,7 @@ Contract for a provider (enforced by tests/test_providers.py):
 """
 
 from collections.abc import Callable, Iterator, Mapping
+import contextlib
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 import json
@@ -242,6 +243,10 @@ class ReviewRequest:
     failure: str | None = None
     failure_detail: str | None = None
     retryable: bool = False
+    # Called when an attempt starts or learns its session or process group, so the run record stays current.
+    on_change: Callable[[], None] | None = None
+    # Guards ``attempts`` while another thread serializes the run record.
+    record_lock: Any = None
 
     def remaining(self) -> float:
         return self.timeout if self.deadline is None else max(0.0, self.deadline - time.monotonic())
@@ -251,9 +256,28 @@ class ReviewRequest:
         if self.failure is None:
             self.failure, self.failure_detail, self.retryable = reason, detail, retryable
 
-    def attempt(self, session_id: str | None, log: Path, cwd: Path | None, status: int, **details: Any) -> None:
-        self.attempts.append({"session_id": session_id, "log": str(log.absolute()),
-                              "cwd": str((cwd or self.cwd or Path.cwd()).absolute()), "status": status, **details})
+    def begin_attempt(self, session_id: str | None, log: Path, *, temporary_cwd: bool = False,
+                      **details: Any) -> None:
+        """Records an attempt before its CLI starts; ``status`` stays None until it ends."""
+        entry: dict[str, Any] = {"session_id": session_id, "log": str(log.absolute()),
+                                 "cwd": None if temporary_cwd else str((self.cwd or Path.cwd()).absolute()),
+                                 "status": None, **details}
+        if temporary_cwd:
+            entry["cwd_note"] = "a private temporary directory, removed when the attempt ended"
+        with self.record_lock or contextlib.nullcontext():
+            self.attempts.append(entry)
+        self.changed()
+
+    def update_attempt(self, **values: Any) -> None:
+        with self.record_lock or contextlib.nullcontext():
+            if not self.attempts or all(self.attempts[-1].get(key) == value for key, value in values.items()):
+                return
+            self.attempts[-1].update(values)
+        self.changed()
+
+    def changed(self) -> None:
+        if self.on_change is not None:
+            self.on_change()
 
     def say(self, text: str) -> None:
         stream = self.messages or sys.stderr
@@ -380,18 +404,21 @@ class Provider:
             stdin = request.combined_input
         else:
             command.append(request.prompt)
+        request.begin_attempt(session_id, request.log)
         with request.output.open("wb") as output, request.log.open("wb") as log:
             status = run_reviewer_command(command, request, stdin=stdin, stdout=output, stderr=log)
-        request.attempt(session_id, request.log, None, status)
+        request.update_attempt(status=status)
         return status
 
 
 def run_reviewer_command(command: list[str], request: ReviewRequest, *, stdin: Path | None,
                          stdout: IO[bytes], stderr: IO[bytes], cwd: Path | None = None,
-                         completed: Callable[[], bool] | None = None) -> int:
+                         completed: Callable[[], bool] | None = None,
+                         progress: Callable[[], None] | None = None) -> int:
     """Runs one CLI in its own process group with the request's timeout; returns 124 on timeout.
 
-    ``cwd`` defaults to the request's working directory.
+    ``cwd`` defaults to the request's working directory. ``progress``, when given, is polled about once a
+    second while the CLI runs.
     """
     timeout = request.remaining()
     deadline = request.deadline if request.deadline is not None else time.monotonic() + timeout
@@ -404,11 +431,18 @@ def run_reviewer_command(command: list[str], request: ReviewRequest, *, stdin: P
                                    env=scrubbed_environment(), cwd=cwd or request.cwd)
         if process is None:
             return 124
+        if request.attempts and request.attempts[-1].get("status") is None:
+            request.update_attempt(process_group=process.pid)
         if completed is not None:
             return _wait_for_review_completion(process, processes, completed, deadline, timeout, command, stderr)
         try:
             try:
-                return process.wait(timeout=timeout)
+                while progress is not None and time.monotonic() < deadline:
+                    try:
+                        return process.wait(timeout=max(0.0, min(1.0, deadline - time.monotonic())))
+                    except subprocess.TimeoutExpired:
+                        progress()
+                return process.wait(timeout=max(0.0, deadline - time.monotonic()))
             except subprocess.TimeoutExpired:
                 _kill_group(process.pid, signal.SIGTERM)
                 _wait_unreaped(process.pid, REVIEW_KILL_GRACE_SECS)
@@ -538,11 +572,22 @@ class CodexProvider(Provider):
             command = [request.executable, "exec", *model, "--config", f'model_reasoning_effort="{effort}"',
                        "--config", 'approval_policy="never"', "-s", "read-only", "--skip-git-repo-check",
                        "--output-last-message", str(request.output), "--color", "never", "-"]
+            request.begin_attempt(None, attempt_log, reasoning=effort)
+
+            def watch_session(log_path: Path = attempt_log) -> None:
+                # Codex prints its session ID in the log header, before any review work.
+                if request.attempts[-1].get("session_id") is None:
+                    with log_path.open("rb") as head:
+                        found = CODEX_SESSION.search(head.read(8192).decode(errors="replace"))
+                    if found:
+                        request.update_attempt(session_id=found.group(1))
+
             with attempt_log.open("wb") as log:
-                status = run_reviewer_command(command, request, stdin=request.combined_input, stdout=log, stderr=log)
+                status = run_reviewer_command(command, request, stdin=request.combined_input, stdout=log, stderr=log,
+                                             progress=watch_session)
             diagnostics = attempt_log.read_text(errors="replace")
-            session = re.search(r"^session id:\s*(\S+)\s*$", diagnostics, re.MULTILINE)
-            request.attempt(session.group(1) if session else None, attempt_log, None, status, reasoning=effort)
+            session = CODEX_SESSION.search(diagnostics)
+            request.update_attempt(status=status, **({"session_id": session.group(1)} if session else {}))
             # From here on the last attempt's log is the reviewer's log, whatever ends the loop.
             shutil.copyfile(attempt_log, request.log)
             if _nonempty(request.output) and (status == 0 or not request.require_zero_exit):
@@ -588,6 +633,7 @@ class CodexProvider(Provider):
 
 
 CODEX_REASONING = ("minimal", "low", "medium", "high")
+CODEX_SESSION = re.compile(r"^session id:\s*(\S+)\s*$", re.MULTILINE)
 
 
 def codex_config_reasoning(environ: Mapping[str, str]) -> str | None:
@@ -693,23 +739,29 @@ class AgyProvider(Provider):
         error = _agy_stream_facts(self.stream_path(request))[1]
         return _diagnostic_lines(request.log) + ([error] if error else [])
 
+    def review(self, request: ReviewRequest) -> int:
+        status = super().review(request)
+        if request.failure == "timeout" and request.failure_detail is None:
+            # Not a rate limit, but the stream's own error (such as a stalled upstream) still explains it.
+            request.failure_detail = _agy_stream_facts(self.stream_path(request))[1]
+        return status
+
     def run_review(self, request: ReviewRequest) -> int:
         # The sandbox may write its working directory, so keep it separate from other reviewers' artifacts.
         work = request.output.absolute().with_name(request.output.stem + ".work")
         shutil.rmtree(work, ignore_errors=True)
         work.mkdir()
-        launched = False
         status = 1
         try:
-            status, launched = self._run_review(request, work)
+            status = self._run_review(request, work)
             return status
         finally:
             shutil.rmtree(work, ignore_errors=True)
-            if launched:
-                conversation = _agy_stream_facts(self.stream_path(request))[0]
-                request.attempt(conversation, request.log, work, status)
+            if request.attempts and request.attempts[-1].get("status") is None:
+                conversation = request.attempts[-1].get("session_id") or _agy_stream_facts(self.stream_path(request))[0]
+                request.update_attempt(status=status, session_id=conversation)
 
-    def _run_review(self, request: ReviewRequest, work: Path) -> tuple[int, bool]:
+    def _run_review(self, request: ReviewRequest, work: Path) -> int:
         stem = str(request.log.absolute()).removesuffix(".log")
         stream_path = self.stream_path(request)
         with request.output.open("wb") as output, request.log.open("wb") as log, stream_path.open("wb") as stream:
@@ -718,7 +770,7 @@ class AgyProvider(Provider):
             except UnicodeError:
                 log.write(b"Error: agy review input is not valid UTF-8.\n")
                 request.fail("error", "agy review input is not valid UTF-8")
-                return 1, False
+                return 1
             message = {"event": "user", "message": {"content": AGY_REVIEW_NOTE + content}}
             stdin = work / "stdin.jsonl"
             stdin.write_text(json.dumps(message, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -734,6 +786,20 @@ class AgyProvider(Provider):
             encoded: bytes | None = None
             pending = b""
             failure = "invalid_output"
+            # The review text streamed so far, kept as failure evidence if agy never finishes.
+            partial: list[str] = []
+
+            def note(event: dict[str, Any]) -> None:
+                kind = event.get("event")
+                nested = event.get(kind) if isinstance(kind, str) else None
+                nested = nested if isinstance(nested, dict) else {}
+                conversation = event.get("conversation_id") or nested.get("conversation_id")
+                if isinstance(conversation, str) and request.attempts and not request.attempts[-1].get("session_id"):
+                    request.update_attempt(session_id=conversation)
+                if nested.get("step_type") == "agent_response" and isinstance(nested.get("text_delta"), str):
+                    partial.append(nested["text_delta"])
+
+            request.begin_attempt(None, request.log, temporary_cwd=True)
             with stream_path.open("rb") as events:
                 def observe(*, final: bool = False) -> bool:
                     nonlocal result, encoded, pending, failure
@@ -749,6 +815,7 @@ class AgyProvider(Provider):
                         event = json.loads(line.decode("utf-8"))
                         if not isinstance(event, dict):
                             raise ValueError("expected a JSON event object")
+                        note(event)
                         if result is not None:
                             raise ValueError("unexpected event after terminal result")
                         if event.get("event") != "result":
@@ -780,7 +847,16 @@ class AgyProvider(Provider):
                     status = run_reviewer_command(command, request, stdin=stdin, stdout=stream, stderr=log,
                                                   cwd=work, completed=observe)
                     if status != 0:
-                        return status, True
+                        # Timed out or interrupted: pick up what agy streamed after the last check.
+                        for line in (pending + events.read()).split(b"\n"):
+                            try:
+                                event = json.loads(line.decode("utf-8"))
+                            except ValueError:
+                                continue
+                            if isinstance(event, dict):
+                                note(event)
+                        output.write("".join(partial).encode("utf-8"))
+                        return status
                     if not observe(final=True):
                         raise ValueError("missing terminal result")
                 except ValueError as error:
@@ -788,10 +864,10 @@ class AgyProvider(Provider):
                     log.flush()
                     if failure != "error":
                         request.fail(failure, str(error)[:300])
-                    return 1, True
+                    return 1
             assert encoded is not None
             output.write(encoded)
-            return 0, True
+            return 0
 
     def resume(self, session_id: str, directory: Path) -> list[str]:
         return [self.executable(), "--conversation", session_id]

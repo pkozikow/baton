@@ -86,11 +86,13 @@ permission blocker and affected coverage. Never loosen the reviewers' read-only
 sandbox or `never` approval policy, use permission bypass flags, or change global
 permission settings.
 
-The run prints `Maximum duration` up front (the longest reviewer timeout plus a
+The run prints `Maximum duration` before reviewers start (the longest reviewer timeout plus a
 shutdown grace); launch it with an execution window at least that long. If the
 harness backgrounds it, explicitly await the process. Before reading results, confirm
 the run finished: `baton review show <run-dir>` must not report `running`. Never
-return while a run you launched is still running.
+return while a run you launched is still running. If `show` reports reviewer process
+groups still running after an interrupted run, report them with the stop command it
+prints.
 
 ## Read the results
 
@@ -107,8 +109,9 @@ The runner already retried each rate-limited or transiently failing reviewer onc
 Report the coverage as N of M and name each failed reviewer with its reason. If all
 reviewers fail, state that no usable review was obtained.
 
-Implementation runs embed whole per-file diffs up to a size limit and list the rest
-in `run.json` (`input.not_embedded`); reviewers read those from `<dir>/diffs/`. Report
+Implementation runs embed whole per-file diffs while the whole input fits its
+budget and list the rest in `run.json` (`input.not_embedded`) and
+`<dir>/diffs/INDEX.txt`; reviewers read those from `<dir>/diffs/`. Report
 each non-embedded file and whether any reviewer says it read it; a non-embedded
 file that no reviewer covered is a coverage gap, not a blocker by itself.
 

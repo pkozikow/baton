@@ -71,6 +71,18 @@ if name == "agy":
             raise SystemExit(1)
         signal.signal(signal.SIGTERM, stopped)
         time.sleep(60)
+    if behavior in ("partial_hang", "stalled_hang"):
+        print(json.dumps({"event": "step_update", "step_update": {"step_type": "agent_response",
+                                                                  "text_delta": "## Summary\nPartial "}}), flush=True)
+        print(json.dumps({"event": "step_update", "step_update": {"step_type": "agent_response",
+                                                                  "text_delta": "review text\n"}}), flush=True)
+        if behavior == "stalled_hang":
+            def stalled(*_):
+                print(json.dumps({"event": "result", "result": {"status": "ERROR", "response": "",
+                                                                "error": "stream stalled upstream"}}), flush=True)
+                raise SystemExit(1)
+            signal.signal(signal.SIGTERM, stalled)
+        time.sleep(60)
     if behavior == "error_payload":
         print(json.dumps({"event": "result", "result": {"status": "ERROR", "response": "",
                                                         "error": "Unauthenticated: please run agy login"}}), flush=True)
@@ -383,7 +395,11 @@ class PlanReviewGoldenTest(ReviewRunnerFixture):
                 self.assertTrue(entry["attempts"][0]["accepted"])
                 self.assertNotIn("args", entry["attempts"][0])
         self.assertEqual(reviewers["codex"]["attempts"][0]["reasoning"], "high")
-        self.assertEqual(reviewers["agy"]["cwd"], str(run_dir / "golden-plan-review-agy.work"))
+        # agy runs in a private directory that is gone by now; the record says so instead of naming it.
+        self.assertEqual((reviewers["agy"]["cwd"], reviewers["agy"]["attempts"][0]["cwd"]), (None, None))
+        self.assertIn("temporary", reviewers["agy"]["attempts"][0]["cwd_note"])
+        for name in ("codex", "claude", "agy"):
+            self.assertEqual(reviewers[name]["attempts"][0]["process_group"], self.calls(name)[0]["pid"])
         self.assertEqual(reviewers["claude"]["cwd"], str(self.root))
         uuid.UUID(sessions["claude"])
         # Command lines are not recorded: the prompt never appears in the record.
@@ -798,6 +814,18 @@ class FailureHandlingTest(ReviewRunnerFixture):
         self.assertIn("Unauthenticated: please run agy login",
                       (self.run_dir(result) / "golden-plan-review-agy.log").read_text())
 
+    def test_agy_timeout_keeps_streamed_text_and_the_stream_error(self) -> None:
+        self.env.update(STUB_AGY="partial_hang", PLAN_REVIEW_AGY_TIMEOUT_SECS="3")
+        result = self.plan_review(reviewers="agy,claude")
+        run_dir = self.run_dir(result)
+        self.assertEqual((run_dir / "golden-plan-review-agy.md.failed").read_text(), "## Summary\nPartial review text\n")
+        self.assertEqual((self.reviewer(result, "agy")["failure"], self.reviewer(result, "agy")["failure_detail"]),
+                         ("timeout", None))
+        self.env["STUB_AGY"] = "stalled_hang"
+        result = self.plan_review(reviewers="agy,claude")
+        entry = self.reviewer(result, "agy")
+        self.assertEqual((entry["failure"], entry["failure_detail"]), ("timeout", "stream stalled upstream"))
+
     def test_codex_timeout_keeps_the_timed_out_attempts_log_without_fallback(self) -> None:
         self.env.update(STUB_CODEX="hang", PLAN_REVIEW_CODEX_TIMEOUT_SECS="2")
         result = self.plan_review(reviewers="codex,claude")
@@ -900,9 +928,11 @@ class PeerReviewGoldenTest(ReviewRunnerFixture):
         self.assertTrue(diff.startswith("diff --git a/change.txt b/change.txt\n"), diff)
         self.assertEqual((run_dir / "diffs/change.txt.diff").read_text(), diff)
         self.assertEqual(calls["claude"][0]["stdin"], (run_dir / "feature-review.input.txt").read_text())
-        self.assertEqual(calls["claude"][0]["stdin"],
-                         f"Changed files (main...HEAD): 1 files, {len(diff)} diff bytes; 1 embedded below, 0 not "
-                         f"embedded.\n- A change.txt ({len(diff)} bytes)\n\nEmbedded diffs:\n\n{diff}")
+        listing = (f"Changed files (main...HEAD): 1 files, {len(diff)} diff bytes. Each file's diff is in "
+                   f"{run_dir / 'diffs'} under the file's path plus .diff; the complete list is "
+                   f"{run_dir / 'diffs/INDEX.txt'}.\n- A change.txt ({len(diff)} bytes)")
+        self.assertEqual(calls["claude"][0]["stdin"], f"{listing}\n\nEmbedded diffs:\n\n{diff}")
+        self.assertEqual((run_dir / "diffs/INDEX.txt").read_text(), listing + "\n")
         self.assertIn("\n\nChanges to review:\n\nChanged files", calls["codex"][0]["stdin"])
         prompt = (run_dir / "feature-review.prompt.txt").read_text()
         head = self.git("rev-parse", "HEAD")
@@ -923,47 +953,96 @@ class PeerReviewGoldenTest(ReviewRunnerFixture):
                                                        "merge_base", "head_sha", "warnings")},
                          {"kind": "implementation", "repository": str(self.repo), "branch": "feature",
                           "base_ref": "main", "base_sha": base, "merge_base": base, "head_sha": head, "warnings": []})
-        self.assertEqual(record["input"], {"files": 1, "diff_bytes": len(diff), "max_embedded_bytes": 250000,
-                                           "diffs": str(run_dir / "diffs"), "embedded": ["change.txt"],
-                                           "not_embedded": []})
+        combined = run_dir / "feature-review-input.txt"
+        self.assertEqual(record["input"], {"files": 1, "diff_bytes": len(diff), "max_input_bytes": 180000,
+                                           "input_bytes": combined.stat().st_size, "diffs": str(run_dir / "diffs"),
+                                           "index": str(run_dir / "diffs/INDEX.txt"), "listing": "full",
+                                           "embedded": ["change.txt"], "not_embedded": []})
 
-    def test_large_diffs_embed_whole_files_and_list_the_rest(self) -> None:
+    def test_large_diffs_embed_whole_files_within_the_input_budget(self) -> None:
         self.commit({"aaa.lock": "lock\n" * 5, "core/engine.py": "core = 1\n" * 40, "docs/a b.md": "doc\n",
-                     "small.py": "x = 1\n", "old.txt": "old\n"})
+                     "small.py": "x = 1\n", "old.txt": "old\n", "schema.json": "{}\n"})
         self.git("switch", "-q", "main")
         self.git("merge", "-q", "--ff-only", "feature")
         self.git("switch", "-q", "feature")
         self.git("mv", "old.txt", "renamed.txt")
-        self.commit({"core/engine.py": "core = 2\n" * 40, "aaa.lock": "lock 2\n" * 5, "docs/a b.md": "doc 2\n",
-                     "small.py": "x = 2\n"})
-        sizes = {}
-        for name in ("aaa.lock", "core/engine.py", "docs/a b.md", "small.py"):
-            sizes[name] = len(subprocess.run(["git", "diff", "--no-color", "-M", "main...HEAD", "--", name],
-                                             cwd=self.repo, env=self.env, capture_output=True).stdout)
-        # Room for the small files and the lock file, not the engine; the lock file is considered last.
-        self.env["PEER_REVIEW_MAX_DIFF_BYTES"] = str(sum(sizes.values()) - sizes["core/engine.py"] + 120)
+        # Large enough that the diffs, not the prompt, decide what fits.
+        self.commit({"core/engine.py": "core = 2\n" * 400, "aaa.lock": "lock 2\n" * 100,
+                     "docs/a b.md": "doc 2\n" * 100, "small.py": "x = 2\n" * 100, "schema.json": '{"a": 1}\n' * 100})
+        # Measure the whole input with everything embedded, then leave out room for the engine only.
+        self.env["PEER_REVIEW_MAX_INPUT_BYTES"] = "0"
+        everything = self.record(self.peer_review("claude"))["input"]["input_bytes"]
+        (self.root / "claude.calls").unlink()
+        engine = len(subprocess.run(["git", "diff", "--no-color", "-M", "main...HEAD", "--", "core/engine.py"],
+                                    cwd=self.repo, env=self.env, capture_output=True).stdout)
+        # Slack for the listing, which reserves room to mark every file not embedded.
+        limit = everything - engine + 120
+        self.env["PEER_REVIEW_MAX_INPUT_BYTES"] = str(limit)
         result = self.peer_review("claude")
         run_dir = self.run_dir(result)
         diffs = run_dir / "diffs"
         self.assertEqual(sorted(str(path.relative_to(diffs)) for path in diffs.rglob("*.diff")),
                          ["aaa.lock.diff", "core/engine.py.diff", "docs/a b.md.diff", "renamed.txt.diff",
-                          "small.py.diff"])
+                          "schema.json.diff", "small.py.diff"])
         self.assertIn("rename from old.txt", (diffs / "renamed.txt.diff").read_text())
         record = self.record(result)
         self.assertEqual(record["input"]["not_embedded"], ["core/engine.py"])
-        self.assertEqual(record["input"]["embedded"], ["docs/a b.md", "renamed.txt", "small.py", "aaa.lock"])
+        # Source first, then data files, then lock files.
+        self.assertEqual(record["input"]["embedded"], ["docs/a b.md", "renamed.txt", "small.py", "schema.json",
+                                                       "aaa.lock"])
+        combined = run_dir / "feature-review-input.txt"
+        self.assertEqual(record["input"]["input_bytes"], combined.stat().st_size)
+        self.assertLessEqual(combined.stat().st_size, limit)
         stdin = self.calls("claude")[0]["stdin"]
         listing, embedded = stdin.split("\n\nEmbedded diffs:\n\n")
-        self.assertIn(f"- M core/engine.py ({sizes['core/engine.py']} bytes; not embedded, read "
-                      f"{diffs / 'core/engine.py.diff'})", listing.splitlines())
+        self.assertIn(f"- M core/engine.py ({engine} bytes, not embedded)", listing.splitlines())
         self.assertIn("- R old.txt -> renamed.txt (", listing)
+        self.assertNotIn(str(diffs / "core"), listing)
         self.assertNotIn("core = 2", embedded)
-        self.assertLess(embedded.index("small.py"), embedded.index("aaa.lock"))
-        self.assertIn("1 of 5 per-file diffs exceed", result.stderr)
+        self.assertLess(embedded.index("small.py"), embedded.index("schema.json"))
+        self.assertLess(embedded.index("schema.json"), embedded.index("aaa.lock"))
+        self.assertIn(f"Warning: 1 of 6 per-file diffs did not fit in the {limit}-byte reviewer input budget; "
+                      f"reviewers read them on demand. They are marked not embedded in {diffs / 'INDEX.txt'}.",
+                      result.stderr.splitlines())
         self.assertEqual((run_dir / "feature.diff").read_bytes(),
                          b"".join((diffs / name).read_bytes() for name in
                                   ("aaa.lock.diff", "core/engine.py.diff", "docs/a b.md.diff", "renamed.txt.diff",
-                                   "small.py.diff")))
+                                   "schema.json.diff", "small.py.diff")))
+
+    def test_long_file_lists_are_summarized_with_a_complete_index(self) -> None:
+        self.commit({f"pkg/module{index:03d}/file.py": f"value = {index}\n" for index in range(300)}
+                    | {"top.py": "top\n"})
+        self.env["PEER_REVIEW_MAX_INPUT_BYTES"] = "30000"
+        result = self.peer_review("claude")
+        run_dir = self.run_dir(result)
+        record = self.record(result)
+        self.assertEqual(record["input"]["listing"], "directory summary")
+        stdin = self.calls("claude")[0]["stdin"]
+        self.assertIn("The list is too long for this input; changed files by directory:", stdin)
+        self.assertIn("- (top level): 1 files,", stdin)
+        self.assertIn("- pkg/module000/: 1 files,", stdin)
+        self.assertIn("- and 241 more directories (see the complete list)", stdin)
+        index = (run_dir / "diffs/INDEX.txt").read_text().splitlines()
+        self.assertEqual(len(index), 302)
+        not_embedded = set(record["input"]["not_embedded"])
+        self.assertTrue(not_embedded)
+        self.assertEqual({line.split()[2] for line in index[1:] if "not embedded" in line}, not_embedded)
+        self.assertLessEqual((run_dir / "feature-review-input.txt").stat().st_size, 30000)
+
+    def test_old_diff_limit_variable_is_rejected(self) -> None:
+        self.commit()
+        self.env["PEER_REVIEW_MAX_DIFF_BYTES"] = "1000"
+        result = self.peer_review("claude", ok=False)
+        self.assertIn("PEER_REVIEW_MAX_DIFF_BYTES is no longer supported. Use PEER_REVIEW_MAX_INPUT_BYTES",
+                      result.stderr)
+        self.assert_no_run(result)
+
+    def test_base_ref_that_does_not_resolve_is_named(self) -> None:
+        self.commit()
+        result = self.peer_review("claude", "no-such-base", ok=False)
+        self.assertIn("Error: base ref 'no-such-base' does not name a commit in this repository.",
+                      result.stderr.splitlines())
+        self.assertEqual(self.all_calls(), {})
 
     def test_type_changes_and_submodules_keep_one_diff_per_file(self) -> None:
         self.commit({"link": "target\n", "plain.txt": "one\n"})
@@ -1010,7 +1089,7 @@ class PeerReviewGoldenTest(ReviewRunnerFixture):
         result = self.peer_review("claude")
         warnings = self.record(result)["warnings"]
         self.assertEqual(len(warnings), 1)
-        self.assertTrue(warnings[0].startswith("git fetch nowhere failed, so the review uses the local main: "),
+        self.assertTrue(warnings[0].startswith("git fetch nowhere failed, so the review uses the local main: fatal:"),
                         warnings)
         self.assertIn(f"Warning: {warnings[0]}", result.stderr.splitlines())
         self.assertEqual(self.reviewer(result, "claude")["status"], "succeeded")

@@ -48,22 +48,53 @@ class RunStatusTest(ReviewRunnerFixture):
         self.assertEqual(shown["reviewers"][0]["failure"], "timeout")
         self.assertIn(": failed\n", self.show(str(run_dir / "run.json")).stdout)
 
-    def test_killed_run_is_shown_as_interrupted(self) -> None:
-        self.env["STUB_CLAUDE"] = "hang"
-        process = self.start("--reviewers=claude")
+    def test_killed_run_is_shown_as_interrupted_with_its_sessions_and_live_reviewers(self) -> None:
+        self.env.update(STUB_CLAUDE="hang", STUB_CODEX="hang", STUB_AGY="hang")
+        process = self.start("--reviewers=codex,claude,agy")
         run_dir = self.wait_for_run_dir()
+        # Each attempt is recorded while it runs, with its process group and session as soon as it is known.
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            attempts = {entry["provider"]: entry.get("attempts") or []
+                        for entry in json.loads((run_dir / "run.json").read_text())["reviewers"]}
+            if all(attempts[name] and attempts[name][0].get("session_id") for name in ("codex", "claude", "agy")):
+                break
+            time.sleep(0.1)
+        groups = {name: self.calls(name)[0]["pid"] for name in ("codex", "claude", "agy")}
+        self.assertEqual({name: (attempts[name][0]["session_id"], attempts[name][0]["process_group"],
+                                 attempts[name][0]["status"]) for name in groups},
+                         {"codex": (f"codex-session-{groups['codex']}", groups["codex"], None),
+                          "claude": (attempts["claude"][0]["session_id"], groups["claude"], None),
+                          "agy": (f"agy-conversation-{groups['agy']}", groups["agy"], None)})
         process.send_signal(signal.SIGKILL)
         process.communicate(timeout=10)
-        record = json.loads((run_dir / "run.json").read_text())
-        self.assertEqual(record["status"], "running")
-        output = self.show(str(run_dir)).stdout
-        self.assertIn(f"Review run {record['id']} (plan): interrupted (recorded as running; runner pid "
-                      f"{record['pid']} is gone)", output)
-        shown = json.loads(self.show(record["id"], "--json").stdout)
-        self.assertEqual((shown["status"], shown["recorded_status"]), ("interrupted", "running"))
-        self.assertEqual([entry["status"] for entry in shown["reviewers"]], ["interrupted"])
-        # The orphaned reviewer is not this test's concern beyond cleanup.
-        os.killpg(self.calls("claude")[0]["pid"], signal.SIGKILL)
+        try:
+            record = json.loads((run_dir / "run.json").read_text())
+            self.assertEqual(record["status"], "running")
+            output = self.show(str(run_dir)).stdout.splitlines()
+            self.assertIn(f"Review run {record['id']} (plan): interrupted (recorded as running; runner pid "
+                          f"{record['pid']} is gone)", output)
+            for name, group in groups.items():
+                self.assertIn(f"Warning: {name} reviewer process group {group} is still running after its runner "
+                              f"stopped; stop it with: kill -TERM -{group}", output)
+                session = attempts[name][0]["session_id"]
+                self.assertTrue(any(line.startswith(f"    attempt 1: {name} session {session}, ") and "unfinished" in line
+                                    for line in output), output)
+            shown = json.loads(self.show(record["id"], "--json").stdout)
+            self.assertEqual((shown["status"], shown["recorded_status"]), ("interrupted", "running"))
+            self.assertEqual([entry["status"] for entry in shown["reviewers"]], ["interrupted"] * 3)
+            self.assertEqual(sorted(group["process_group"] for group in shown["live_process_groups"]),
+                             sorted(groups.values()))
+        finally:
+            for group in groups.values():
+                try:
+                    os.killpg(group, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and "still running" in self.show(str(run_dir)).stdout:
+            time.sleep(0.1)
+        self.assertNotIn("still running", self.show(str(run_dir)).stdout)
 
     def test_reused_pid_is_not_mistaken_for_the_runner(self) -> None:
         own = os.getpid()
@@ -191,6 +222,25 @@ class SaveTest(unittest.TestCase):
                 self.assertIn("Not a review run record", result.stderr)
         self.assertFalse((self.directory / "reviews").exists())
         self.assertFalse((self.directory / "escaped").exists())
+
+    def test_refused_save_copies_nothing_and_a_leftover_copy_is_not_trusted(self) -> None:
+        run_dir = self.run_dir(self.baton("review", "run", "--kind=plan"))
+        record = json.loads((run_dir / "run.json").read_text())
+        reviews = self.directory / "reviews"
+        # An artifact checkout that cannot take the commit refuses the save before anything is copied.
+        self.fixture.git(self.fixture.artifacts, "switch", "-q", "-c", "elsewhere")
+        result = self.baton("review", "save", str(run_dir), ok=False)
+        self.assertIn("Project artifacts are committed only on main", result.stderr)
+        self.assertFalse(reviews.exists())
+        self.fixture.git(self.fixture.artifacts, "switch", "-q", "main")
+        # A copy left by a save whose commit failed is replaced and committed, not reported as saved.
+        leftover = reviews / record["id"]
+        leftover.mkdir(parents=True)
+        (leftover / "run.json").write_text("{}")
+        result = self.baton("review", "save", str(run_dir))
+        self.assertNotIn("already saved", result.stdout)
+        self.assertEqual(json.loads((leftover / "run.json").read_text()), record)
+        self.assertTrue(self.fixture.git(self.fixture.artifacts, "ls-files", "--", str(leftover / "run.json")))
 
     def test_save_outside_a_project_has_nothing_to_save(self) -> None:
         plan = self.fixture.root / "loose-plan.md"
