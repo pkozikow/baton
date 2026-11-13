@@ -88,6 +88,13 @@ class RunStatusTest(ReviewRunnerFixture):
                       "exit 0, reasoning high [accepted]", output)
         self.assertTrue(output[-1].startswith("Reviewer sessions hold the untrusted diff or plan text"))
 
+    def test_listing_ignores_symlinked_run_directories(self) -> None:
+        record = self.record(self.plan_review(reviewers="claude"))
+        (self.tmp / "plan-review.planted.x").symlink_to(Path(record["run_dir"]), target_is_directory=True)
+        result = subprocess.run([str(BATON), "review", "list", "--json"], cwd=self.root, env=self.env, text=True,
+                                capture_output=True)
+        self.assertEqual([row["path"] for row in json.loads(result.stdout)], [record["run_dir"]])
+
     def test_unknown_run_and_unsaved_list_outside_a_project(self) -> None:
         result = subprocess.run([str(BATON), "review", "show", "nope"], cwd=self.root, env=self.env, text=True,
                                 capture_output=True)
@@ -171,6 +178,17 @@ class SaveTest(unittest.TestCase):
         (run_dir / "run.json").write_text(json.dumps({**record, "project": {"name": "other", "uuid": "0" * 32}}))
         result = self.baton("review", "save", str(run_dir), ok=False)
         self.assertIn("belongs to project other", result.stderr)
+
+    def test_save_rejects_a_record_whose_id_is_not_a_run_id(self) -> None:
+        run_dir = self.run_dir(self.baton("review", "run", "--kind=plan"))
+        record = json.loads((run_dir / "run.json").read_text())
+        for forged in ("../escaped", "/tmp/escaped", "20261113T000000Z-plan-x/../../x"):
+            with self.subTest(id=forged):
+                (run_dir / "run.json").write_text(json.dumps({**record, "id": forged}))
+                result = self.baton("review", "save", str(run_dir), ok=False)
+                self.assertIn("Not a review run record", result.stderr)
+        self.assertFalse((self.directory / "reviews").exists())
+        self.assertFalse((self.directory / "escaped").exists())
 
     def test_save_outside_a_project_has_nothing_to_save(self) -> None:
         plan = self.fixture.root / "loose-plan.md"

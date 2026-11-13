@@ -61,6 +61,7 @@ RETRY_BACKOFF_MAX_SECS = 10.0
 # Unbounded inspection made plan reviewers run out of time (hundreds of reads), so the prompt states a budget.
 READ_BUDGET = 40
 RUN_RETENTION_SECS = 7 * 24 * 3600
+FETCH_TIMEOUT_SECS = 60
 # Embedded last: reviewers learn least from generated, lock and vendored files.
 DEPRIORITIZED = re.compile(r"(^|/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|[^/]*\.lock|"
                            r"go\.sum|[^/]*\.min\.(js|css)|[^/]*_pb2(_grpc)?\.pyi?|[^/]*\.pb\.go|[^/]*\.snap)$|"
@@ -198,6 +199,19 @@ def project_status() -> dict[str, Any] | None:
     except NoProject:
         return None
     return manager.status_data(project)
+
+
+def project_identity() -> dict[str, Any] | None:
+    """The name and UUID of the project the working directory belongs to, or None outside any project."""
+    from .manager import Manager
+    manager = Manager()
+    if not manager.initialized():
+        return None
+    manager.load()
+    try:
+        return manager.project()
+    except NoProject:
+        return None
 
 
 def _git(*args: str, check: bool = True) -> str:
@@ -377,12 +391,27 @@ def file_diffs(base_ref: str) -> list[FileDiff]:
     return [FileDiff(status, path, chunk, old) for (status, path, old), chunk in zip(entries, chunks)]
 
 
-def diff_file_name(path: str) -> str:
-    """Where a changed file's diff goes below the diffs directory: its own path plus .diff, else a flat slug."""
-    parts = Path(path).parts
-    if not parts or Path(path).is_absolute() or any(part in (".", "..") for part in parts):
-        return slugify(path) + ".diff"
-    return path + ".diff"
+def diff_file_names(paths: list[str]) -> dict[str, str]:
+    """Where each changed file's diff goes below the diffs directory: its own path plus .diff when that is safe.
+
+    A name that would escape the directory, or collide with another (also case-insensitively, or as a file where
+    another needs a directory), becomes a numbered flat slug instead.
+    """
+    names: dict[str, str] = {}
+    files: set[str] = set()
+    directories: set[str] = set()
+    for index, path in enumerate(paths):
+        name = path + ".diff"
+        parts = Path(name).parts
+        parents = {"/".join(parts[:end]).casefold() for end in range(1, len(parts))}
+        if (Path(path).is_absolute() or any(part in ("", ".", "..") for part in Path(path).parts) or not parts
+                or name.casefold() in files | directories or parents & files):
+            name = f"{index + 1:05d}-{slugify(path)}.diff"
+            parents = set()
+        names[path] = name
+        files.add(name.casefold())
+        directories |= parents
+    return names
 
 
 def implementation_input(target: str | None, extra: str, focus: tuple[str, str] | None, allow_stale_base: bool,
@@ -428,11 +457,16 @@ def implementation_input(target: str | None, extra: str, focus: tuple[str, str] 
         record = review.record
         remote = os.environ.get("PEER_REVIEW_FETCH_REMOTE") or "origin"
         if os.environ.get("PEER_REVIEW_SKIP_FETCH", "0") != "1":
-            fetch = subprocess.run(["git", "fetch", remote], capture_output=True, text=True)
-            if fetch.returncode:
+            try:
+                fetch = subprocess.run(["git", "fetch", remote], capture_output=True, text=True,
+                                       stdin=subprocess.DEVNULL, timeout=FETCH_TIMEOUT_SECS,
+                                       env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+                problem = (fetch.stderr.strip().splitlines() or ["no error output"])[-1] if fetch.returncode else None
+            except subprocess.TimeoutExpired:
+                problem = f"no answer within {FETCH_TIMEOUT_SECS}s"
+            if problem is not None:
                 # A restricted sandbox can deny the fetch; the local base is still a usable base.
-                warning = (f"git fetch {remote} failed, so the review uses the local {base_ref}: "
-                           + (fetch.stderr.strip().splitlines() or ["no error output"])[-1])
+                warning = f"git fetch {remote} failed, so the review uses the local {base_ref}: {problem}"
                 record.setdefault("warnings", []).append(warning)
                 print(f"Warning: {warning}", file=sys.stderr, flush=True)
         record["head_sha"] = _git("rev-parse", "HEAD")
@@ -448,8 +482,9 @@ def implementation_input(target: str | None, extra: str, focus: tuple[str, str] 
             print(f"No diff found for {base_ref}...HEAD on branch {branch}.", file=sys.stderr, flush=True)
             return
         directory = run_dir / "diffs"
+        names = diff_file_names([diff.path for diff in diffs])
         for diff in diffs:
-            path = directory / diff_file_name(diff.path)
+            path = directory / names[diff.path]
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(diff.patch)
         embedded: list[FileDiff] = []
@@ -458,13 +493,14 @@ def implementation_input(target: str | None, extra: str, focus: tuple[str, str] 
             if not max_bytes or len(diff.patch) <= budget:
                 embedded.append(diff)
                 budget -= len(diff.patch)
-        omitted = [diff for diff in diffs if diff not in embedded]
+        chosen = {diff.path for diff in embedded}
+        omitted = [diff for diff in diffs if diff.path not in chosen]
         size = sum(len(diff.patch) for diff in diffs)
         listing = [f"Changed files ({base_ref}...HEAD): {len(diffs)} files, {size} diff bytes; "
                    f"{len(embedded)} embedded below, {len(omitted)} not embedded."]
         for diff in diffs:
             name = diff.path if diff.old_path is None else f"{diff.old_path} -> {diff.path}"
-            where = "" if diff in embedded else f"; not embedded, read {directory / diff_file_name(diff.path)}"
+            where = "" if diff.path in chosen else f"; not embedded, read {directory / names[diff.path]}"
             listing.append(f"- {diff.status[:1]} {name} ({len(diff.patch)} bytes{where})")
         if omitted:
             print(f"Warning: diff is {size} bytes; {len(omitted)} of {len(diffs)} per-file diffs exceed the "
@@ -639,7 +675,8 @@ def run_command(args: argparse.Namespace) -> int:
         print(f"Error: {error}", file=sys.stderr)
         return 1
     try:
-        data = status()
+        # Reuse the status the input already resolved; otherwise identifying the project is enough.
+        data = status() if status.cache_info().currsize else project_identity()
     except (OSError, ValueError, ProjectError):
         data = None
     if args.focus_area is not None:

@@ -169,8 +169,8 @@ def slugify(value: str) -> str:
 
 FAILURE_REASONS = ("timeout", "rate_limited", "auth", "startup_denied", "invalid_output", "empty", "missing_cli",
                    "error")
-_AUTH = re.compile(r"\b401\b|unauthori[sz]ed|not (logged|signed) in|please (run|use) \S*\s*/?login|"
-                   r"authenticat|invalid (x-)?api[ _-]?key|expired (token|credentials)|token (has )?expired|"
+_AUTH = re.compile(r"\b401\b|unauthori[sz]ed|unauthenticated|not (logged|signed) in|not authenticated|"
+                   r"please (run|use) \S*\s*/?login|authentication (failed|required|error)|invalid (x-)?api[ _-]?key|expired (token|credentials)|token (has )?expired|"
                    r"credentials? (are |is )?(missing|invalid|expired)", re.IGNORECASE)
 _RATE_LIMITED = re.compile(r"\b429\b|rate[ _-]?limit|too many requests|resource[ _]exhausted|quota|usage limit|"
                            r"overloaded|\b529\b", re.IGNORECASE)
@@ -182,15 +182,15 @@ _TRANSIENT = re.compile(r"\b50[0234]\b|service unavailable|bad gateway|gateway t
 def classify_failure(status: int, lines: list[str]) -> tuple[str, str | None, bool]:
     """Classifies a failed review from its exit status and error lines: ``(reason, detail, retryable)``.
 
-    A rate limit that ran into the deadline is reported as ``rate_limited``: it is the root cause.
-    Only rate limits and transient server or network errors are retryable.
+    The most recent recognizable line decides. A rate limit that ran into the deadline is reported as
+    ``rate_limited``: it is the root cause. Only rate limits and transient server or network errors are retryable.
     """
-    for pattern, reason in ((_AUTH, "auth"), (_RATE_LIMITED, "rate_limited"), (_TRANSIENT, "error")):
-        if status == 124 and reason != "rate_limited":
-            continue
-        matched = next((line.strip() for line in reversed(lines) if pattern.search(line)), None)
-        if matched is not None:
-            return reason, matched[:300], reason != "auth"
+    patterns = ((_RATE_LIMITED, "rate_limited"),) if status == 124 else (
+        (_AUTH, "auth"), (_RATE_LIMITED, "rate_limited"), (_TRANSIENT, "error"))
+    for line in reversed(lines):
+        for pattern, reason in patterns:
+            if pattern.search(line):
+                return reason, line.strip()[:300], reason != "auth"
     if status == 124:
         return "timeout", None, False
     detail = next((line.strip() for line in reversed(lines) if line.strip()), None)
@@ -498,8 +498,14 @@ class CodexProvider(Provider):
         return Path(f"{prefix}-{self.name}-{slugify(model)}.md")
 
     def error_lines(self, request: ReviewRequest) -> list[str]:
-        # The log echoes the prompt and the reviewed text after "user", so only Codex's own error lines count.
-        return [line for line in _tail_lines(request.log) if re.match(r"(?:ERROR|Error|error)\b", line)]
+        # The log echoes the prompt and the reviewed text, so only Codex's own error lines count: error-like lines
+        # that do not also appear in that input.
+        try:
+            echoed = set(request.combined_input.read_text(errors="replace").splitlines())
+        except OSError:
+            echoed = set()
+        return [line for line in _tail_lines(request.log)
+                if re.match(r"(?:ERROR|Error|error)\b", line) and line not in echoed]
 
     def run_review(self, request: ReviewRequest) -> int:
         reasoning = request.options.get("reasoning", "high")
@@ -539,7 +545,7 @@ class CodexProvider(Provider):
                 return 0
             if status == 124:
                 # One deadline covers every attempt, so a timed-out attempt leaves no time for a fallback.
-                request.fail("timeout")
+                request.fail(*classify_failure(status, self.error_lines(request)))
                 return status
             if request.processes is not None and request.processes.closed:
                 # Interrupted: a retry could not launch and its empty log would replace this attempt's.
@@ -556,8 +562,8 @@ class CodexProvider(Provider):
                     request.fail("startup_denied")
                     break
                 reason, detail, retryable = classify_failure(status, self.error_lines(request))
-                if reason in ("auth", "rate_limited"):
-                    # Lower reasoning cannot fix these; the runner owns the one retry of a rate limit.
+                if reason == "auth" or retryable:
+                    # Lower reasoning cannot fix these; the runner owns the one retry of a rate limit or outage.
                     request.fail(reason, detail, retryable)
                     break
             if status == 0:
@@ -642,9 +648,14 @@ AGY_REVIEW_NOTE = (
 
 
 def _agy_stream_facts(path: Path) -> tuple[str | None, str | None]:
-    """The conversation ID and terminal error payload in an agy stream, skipping lines that do not parse."""
+    """The conversation ID (from the first event) and terminal error payload (near the end) of an agy stream."""
     conversation = error = None
-    for line in _tail_lines(path, limit=1 << 30):
+    try:
+        with path.open("rb") as handle:
+            first = handle.readline(1 << 20).decode("utf-8", errors="replace")
+    except OSError:
+        first = ""
+    for line in [first, *_tail_lines(path)]:
         try:
             event = json.loads(line)
         except ValueError:

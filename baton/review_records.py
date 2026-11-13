@@ -10,6 +10,7 @@ import filecmp
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -19,6 +20,7 @@ from .errors import NoProject, ProjectError
 from .gitutil import write_json
 
 RECORD = "run.json"
+RUN_ID = re.compile(r"\d{8}T\d{6}Z-(plan|implementation)-[a-z0-9_]+")
 RUN_DIRECTORY_KINDS = ("plan-review", "peer-review")
 REVIEW_SUFFIXES = (".md", ".md.failed", ".md.invalid")
 SESSION_WARNING = ("Reviewer sessions hold the untrusted diff or plan text they reviewed: if you resume one with its "
@@ -63,7 +65,9 @@ def write_record(run_dir: Path, record: dict[str, Any]) -> None:
 
 def read_record(path: Path) -> dict[str, Any]:
     record = json.loads(path.read_text())
-    if not isinstance(record, dict) or not isinstance(record.get("id"), str) or not isinstance(record.get("reviewers"), list):
+    # The ID names the saved copy's directory, so only the runner's own format is accepted.
+    if (not isinstance(record, dict) or not isinstance(record.get("id"), str)
+            or not RUN_ID.fullmatch(record["id"]) or not isinstance(record.get("reviewers"), list)):
         raise ValueError(f"Not a review run record: {path}")
     return record
 
@@ -104,7 +108,9 @@ def _records(directories: list[Path]) -> list[tuple[Path, dict[str, Any]]]:
 
 def _unsaved(project: dict[str, Any] | None) -> list[tuple[Path, dict[str, Any]]]:
     root = temporary_root()
-    directories = sorted(path for kind in RUN_DIRECTORY_KINDS for path in root.glob(f"{kind}.*") if path.is_dir())
+    # Another local user can create directories in a shared temporary root; only the caller's own runs count.
+    directories = sorted(path for kind in RUN_DIRECTORY_KINDS for path in root.glob(f"{kind}.*")
+                         if not path.is_symlink() and path.is_dir() and path.stat().st_uid == os.getuid())
     return [(directory, record) for directory, record in _records(directories)
             if project is None or (record.get("project") or {}).get("uuid") == project["uuid"]]
 
@@ -112,7 +118,7 @@ def _unsaved(project: dict[str, Any] | None) -> list[tuple[Path, dict[str, Any]]
 def _saved(saved_root: Path | None) -> list[tuple[Path, dict[str, Any]]]:
     if saved_root is None or not saved_root.is_dir():
         return []
-    return _records(sorted(path for path in saved_root.iterdir() if path.is_dir()))
+    return _records(sorted(path for path in saved_root.iterdir() if path.is_dir() and not path.name.startswith(".")))
 
 
 def save(run_dir: Path, selector: str | None) -> int:
@@ -148,10 +154,13 @@ def save(run_dir: Path, selector: str | None) -> int:
         staging = saved_root / f".{record['id']}.saving-{os.getpid()}"
         shutil.rmtree(staging, ignore_errors=True)
         staging.mkdir(parents=True)
-        for path in files:
-            shutil.copyfile(path, staging / path.name)
-        write_record(staging, saved_record)
-        staging.replace(destination)
+        try:
+            for path in files:
+                shutil.copyfile(path, staging / path.name)
+            write_record(staging, saved_record)
+            staging.replace(destination)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
     paths = [str(destination / RECORD), *(str(destination / path.name) for path in files)]
     # Committing again after an interrupted save retries the commit; an unchanged copy commits nothing.
     manager.commit_artifacts(project, f"Save {record.get('kind')} review run {record['id']}", paths)

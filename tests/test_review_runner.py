@@ -20,6 +20,7 @@ import time
 import unittest
 import uuid
 
+from baton.review_runner import diff_file_names
 from baton.providers import (AGY_REVIEW_NOTE, PROMPT_STDIN, PROVIDERS, ProcessGroups, ReviewRequest, classify_failure,
                              session_variables)
 import provider_fixtures
@@ -146,6 +147,9 @@ if not behavior.startswith("startup_permission:"):
     if name == "codex":
         print("session id: codex-session-" + str(os.getpid()), file=sys.stderr, flush=True)
 print(name + " diagnostics", file=sys.stderr, flush=True)
+if behavior == "echo_fail":
+    sys.stderr.write("user\n" + stdin)
+    raise SystemExit(1)
 if behavior in ("rate_limited", "auth", "transient"):
     print({"rate_limited": "Error: 429 Too Many Requests", "auth": "Error: Invalid API key. Please run /login",
            "transient": "Error: 503 Service Unavailable"}[behavior], file=sys.stderr, flush=True)
@@ -722,7 +726,8 @@ class FailureHandlingTest(ReviewRunnerFixture):
         self.env["PLAN_REVIEW_TIMEOUT_SECS"] = "20"
         for name, behavior, reason in (("claude", "rate_limited_once", "rate_limited"),
                                        ("cursor", "transient_once", "error"),
-                                       ("codex", "rate_limited_once", "rate_limited")):
+                                       ("codex", "rate_limited_once", "rate_limited"),
+                                       ("codex", "transient_once", "error")):
             with self.subTest(reviewer=name):
                 self.env[f"STUB_{name.upper()}"] = behavior
                 result = self.plan_review(reviewers=name)
@@ -742,9 +747,10 @@ class FailureHandlingTest(ReviewRunnerFixture):
                     self.assertNotEqual(*sessions)
                     self.assertEqual([call["args"][len(CLAUDE_REVIEW_ARGS) + 1] for call in calls], sessions)
                 if name == "codex":
-                    # Lower reasoning cannot fix a rate limit, so no fallback ran before the retry.
+                    # Lower reasoning cannot fix a rate limit or an outage, so no fallback ran before the retry.
                     self.assertEqual([attempt["reasoning"] for attempt in entry["attempts"]], ["high", "high"])
                 del self.env[f"STUB_{name.upper()}"]
+                (self.root / f"{name}.calls").unlink()
 
     def test_persistent_rate_limit_fails_after_one_retry(self) -> None:
         self.env.update(PLAN_REVIEW_TIMEOUT_SECS="20", STUB_CLAUDE="rate_limited")
@@ -798,6 +804,18 @@ class FailureHandlingTest(ReviewRunnerFixture):
         entry = self.reviewer(result, "codex")
         self.assertEqual((entry["failure"], [attempt["status"] for attempt in entry["attempts"]]), ("timeout", [124]))
 
+    def test_codex_ignores_error_lines_echoed_from_the_reviewed_input(self) -> None:
+        self.plan.write_text("# Plan\nError: Invalid API key\n")
+        self.env.update(STUB_CODEX="echo_fail", PLAN_REVIEW_CODEX_AUTO_FALLBACK="0")
+        result = self.plan_review(reviewers="codex,claude")
+        self.assertEqual(self.reviewer(result, "codex")["failure"], "error")
+
+    def test_diff_file_names_avoid_collisions_and_escapes(self) -> None:
+        names = diff_file_names(["a", "a.diff/b", "A.txt", "a.txt", "dir/x", "dir", "../up", "/abs"])
+        self.assertEqual(names, {"a": "a.diff", "a.diff/b": "00002-a.diff-b.diff", "A.txt": "A.txt.diff",
+                                 "a.txt": "00004-a.txt.diff", "dir/x": "dir/x.diff", "dir": "dir.diff",
+                                 "../up": "00007-..-up.diff", "/abs": "00008--abs.diff"})
+
     def test_classification(self) -> None:
         cases = (
             (124, [], ("timeout", None, False)),
@@ -810,6 +828,10 @@ class FailureHandlingTest(ReviewRunnerFixture):
             (1, ["Error: 503 Service Unavailable"], ("error", "Error: 503 Service Unavailable", True)),
             (1, ["boom", ""], ("error", "boom", False)),
             (1, [], ("error", None, False)),
+            # The most recent recognizable line decides, and an informational line is not an auth failure.
+            (1, ["Authenticated as someone", "Error: 401 Unauthorized", "Error: 503 Service Unavailable"],
+             ("error", "Error: 503 Service Unavailable", True)),
+            (1, ["Error: 429 Too Many Requests", "Error: Invalid API key"], ("auth", "Error: Invalid API key", False)),
         )
         for status, lines, expected in cases:
             with self.subTest(status=status, lines=lines):
