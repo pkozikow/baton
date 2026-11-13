@@ -172,8 +172,8 @@ PROJECT`, which resolves the catalog text (`baton review focus NAME` prints it) 
 injects it once. Ad-hoc `--extra-prompt` text is additive. General passes omit
 focused context; plan reviews reject a focus area.
 
-A general round is clean only with no accepted P0/P1/P2 findings and, when two or
-more reviewers are configured, at least two reviewers that produced a review. A
+A general round is clean only with no accepted P0/P1/P2 findings and at least two
+reviewers that produced a review (one when only one reviewer is configured). A
 round that cannot be clean for a reason the next round would repeat, such as a
 reviewer that keeps failing, ends the general phase after its fixes as a coverage
 blocker. From the second round on, earlier rounds' rejected and deferred findings

@@ -66,7 +66,8 @@ FETCH_TIMEOUT_SECS = 60
 DEPRIORITIZED = re.compile(r"(^|/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|[^/]*\.lock|"
                            r"go\.sum|[^/]*\.min\.(js|css)|[^/]*_pb2(_grpc)?\.pyi?|[^/]*\.pb\.go|[^/]*\.snap)$|"
                            r"(^|/)(generated|__generated__|vendor|node_modules|dist)/")
-DIFF_OPTIONS = ("--no-color", "--no-ext-diff", "--no-textconv", "-M")
+# Pinned so user configuration cannot change how many "diff --git" sections a change produces.
+DIFF_OPTIONS = ("--no-color", "--no-ext-diff", "--no-textconv", "--submodule=short", "-M")
 
 
 class ReviewError(Exception):
@@ -93,8 +94,8 @@ class Skipped:
 class ReviewInput:
     """What one run reviews: the text reviewers receive and the facts its record keeps.
 
-    ``write``, when set, runs inside the new run directory (fetching and writing diffs) and fills in
-    ``input``, ``prompt``, ``read_dirs`` and ``record``.
+    ``write``, when set, runs with the new run directory and the run record (fetching and writing diffs),
+    fills in ``input``, ``prompt`` and ``read_dirs`` and adds what it learns to the record.
     """
 
     label: str
@@ -105,13 +106,18 @@ class ReviewInput:
     read_dirs: tuple[Path, ...] = ()
     record: dict[str, Any] = field(default_factory=dict)
     header: list[str] = field(default_factory=list)
-    write: Callable[[Path], None] | None = None
+    write: Callable[[Path, dict[str, Any]], None] | None = None
 
 
 def _non_negative(variable: str, value: str) -> int:
     if not re.fullmatch(r"[0-9]+", value):
         raise ReviewError(f"{variable} must be a non-negative integer.")
     return int(value)
+
+
+def max_input_bytes(settings: "ReviewKind") -> int:
+    return _non_negative(settings.max_bytes_variable,
+                         os.environ.get(settings.max_bytes_variable) or str(settings.default_max_bytes))
 
 
 def prepare(kind: str, reviewers_csv: str, environ: Mapping[str, str], warnings: TextIO,
@@ -327,8 +333,7 @@ def plan_input(target: str | None, extra: str, timeout: int, status: Callable[[]
     if root is not None and label.startswith(f"{root}/"):
         label = label.removeprefix(f"{root}/")
     settings = KINDS["plan"]
-    max_bytes = _non_negative(settings.max_bytes_variable,
-                              os.environ.get(settings.max_bytes_variable) or str(settings.default_max_bytes))
+    max_bytes = max_input_bytes(settings)
     reviewed = content
     truncated = bool(max_bytes) and len(content) > max_bytes
     if truncated:
@@ -384,11 +389,23 @@ def file_diffs(base_ref: str) -> list[FileDiff]:
         else:
             entries.append((status, fields[index + 1], None))
             index += 2
-    # Each changed file starts with its own "diff --git" header; content lines always carry a prefix character.
+    # Each changed file starts with its own "diff --git" header (content lines always carry a prefix character),
+    # except that a type change (file to symlink) is a deletion and an addition under the same header.
     chunks = [chunk for chunk in re.split(rb"(?m)^(?=diff --git )", patch.stdout) if chunk]
-    if len(chunks) != len(entries):
+    diffs, index = [], 0
+    for status, path, old in entries:
+        if index >= len(chunks):
+            break
+        chunk = chunks[index]
+        index += 1
+        if (status.startswith("T") and index < len(chunks)
+                and chunks[index].split(b"\n", 1)[0] == chunk.split(b"\n", 1)[0]):
+            chunk += chunks[index]
+            index += 1
+        diffs.append(FileDiff(status, path, chunk, old))
+    if len(diffs) != len(entries) or index != len(chunks):
         raise ReviewError(f"cannot split the diff into per-file diffs ({len(chunks)} patches for {len(entries)} files)")
-    return [FileDiff(status, path, chunk, old) for (status, path, old), chunk in zip(entries, chunks)]
+    return diffs
 
 
 def diff_file_names(paths: list[str]) -> dict[str, str]:
@@ -446,15 +463,13 @@ def implementation_input(target: str | None, extra: str, focus: tuple[str, str] 
     if branch in ("HEAD", ""):
         raise ReviewError("detached HEAD is not supported. Checkout a branch first.")
     settings = KINDS["implementation"]
-    max_bytes = _non_negative(settings.max_bytes_variable,
-                              os.environ.get(settings.max_bytes_variable) or str(settings.default_max_bytes))
+    max_bytes = max_input_bytes(settings)
     top = Path(_git("rev-parse", "--show-toplevel")).resolve()
     branch_slug = slugify(branch)
     review = ReviewInput(label=f"{top.name}-{branch}", stem=f"{branch_slug}-review", heading="Changes to review:",
                          record={"repository": str(top), "branch": branch, "base_ref": base_ref})
 
-    def write(run_dir: Path) -> None:
-        record = review.record
+    def write(run_dir: Path, record: dict[str, Any]) -> None:
         remote = os.environ.get("PEER_REVIEW_FETCH_REMOTE") or "origin"
         if os.environ.get("PEER_REVIEW_SKIP_FETCH", "0") != "1":
             try:
@@ -615,7 +630,7 @@ def run(kind: str, reviewers: list[Reviewer], skipped: list[Skipped], review: Re
         if succeeded and final.attempts:
             final.attempts[-1]["accepted"] = True
         entries[reviewer.provider.name].update(
-            status="succeeded" if succeeded else "failed", failure=None if succeeded else final.failure or "error",
+            status="succeeded" if succeeded else "interrupted" if processes.closed else "failed", failure=None if succeeded else final.failure or "error",
             failure_detail=None if succeeded else final.failure_detail,
             duration_seconds=round(time.monotonic() - started, 1), review=str(final.output) if succeeded else None,
             log=str(final.log), cwd=final.attempts[-1]["cwd"] if final.attempts else os.getcwd(),
@@ -693,7 +708,6 @@ def run_command(args: argparse.Namespace) -> int:
         "project": None if data is None else {"name": data["name"], "uuid": data["uuid"]},
         "launcher": launching_session(os.environ), "max_duration_seconds": max_duration, "warnings": [],
         **review.record, "reviewers": []}
-    review.record = record
     code = 1
     try:
         write_record(run_dir, record)
@@ -702,7 +716,7 @@ def run_command(args: argparse.Namespace) -> int:
         print(f"Maximum duration: {max_duration}s (the longest reviewer timeout plus {REVIEW_KILL_GRACE_SECS}s to stop "
               "it; a retry shares its reviewer's timeout)", flush=True)
         if review.write is not None:
-            review.write(run_dir)
+            review.write(run_dir, record)
         for line in review.header:
             print(line)
         if review.input:

@@ -83,8 +83,8 @@ failed approval or unresolved scope decision, and stop when the user asks.
    parent under the same rules as step 3, and validate and commit changes before
    another round.
 5. Stop the general phase early on a clean round: a completed report with no
-   accepted P0/P1/P2 findings and, when two or more reviewers are configured, at
-   least two reviewers that produced a review (the report's coverage, N of M).
+   accepted P0/P1/P2 findings and at least two reviewers that produced a review
+   (the report's coverage, N of M), or one when only one reviewer is configured.
    Fixing a report's findings does not turn that report into a clean review, and a
    round below that coverage is never the clean stopping round. Otherwise continue
    only while the configured budget remains.

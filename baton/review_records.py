@@ -252,6 +252,8 @@ def show(run: str, selector: str | None, as_json: bool) -> int:
     print(f"Reviewers: {coverage(record)} produced a review")
     for reviewer in record["reviewers"]:
         outcome = reviewer.get("status")
+        if outcome == "running" and status == "interrupted":
+            outcome = "interrupted"
         if reviewer.get("failure"):
             outcome += f" ({reviewer['failure']}" + (f": {reviewer['failure_detail']}" if reviewer.get("failure_detail") else "") + ")"
         duration = reviewer.get("duration_seconds")

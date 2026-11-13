@@ -953,6 +953,32 @@ class PeerReviewGoldenTest(ReviewRunnerFixture):
                                   ("aaa.lock.diff", "core/engine.py.diff", "docs/a b.md.diff", "renamed.txt.diff",
                                    "small.py.diff")))
 
+    def test_type_changes_and_submodules_keep_one_diff_per_file(self) -> None:
+        self.commit({"link": "target\n", "plain.txt": "one\n"})
+        sub = self.root / "sub"
+        subprocess.run(["git", "init", "-q", "-b", "main", str(sub)], env=self.env, check=True)
+        subprocess.run(["git", "-C", str(sub), "commit", "-q", "--allow-empty", "-m", "Sub"], env=self.env, check=True)
+        self.git("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub), "module")
+        self.git("commit", "-q", "-m", "Add module")
+        self.git("switch", "-q", "main")
+        self.git("merge", "-q", "--ff-only", "feature")
+        self.git("switch", "-q", "feature")
+        (self.repo / "link").unlink()
+        (self.repo / "link").symlink_to("plain.txt")
+        subprocess.run(["git", "-C", str(self.repo / "module"), "commit", "-q", "--allow-empty", "-m", "Next"],
+                       env=self.env, check=True)
+        self.commit({"plain.txt": "two\n"})
+        # A user's submodule diff format must not change how the diff splits.
+        self.git("config", "diff.submodule", "log")
+        result = self.peer_review("claude")
+        record = self.record(result)
+        self.assertEqual(record["input"]["embedded"], ["link", "module", "plain.txt"])
+        diffs = self.run_dir(result) / "diffs"
+        self.assertIn("new file mode 120000", (diffs / "link.diff").read_text())
+        self.assertIn("deleted file mode 100644", (diffs / "link.diff").read_text())
+        self.assertIn("Subproject commit", (diffs / "module.diff").read_text())
+        self.assertIn("+two", (diffs / "plain.txt.diff").read_text())
+
     def test_failed_fetch_is_a_recorded_warning(self) -> None:
         self.commit()
         self.env.update(PEER_REVIEW_SKIP_FETCH="0", PEER_REVIEW_FETCH_REMOTE="nowhere")
@@ -1071,6 +1097,7 @@ class ReviewRunCommandTest(ReviewRunnerFixture):
                     self.assertFalse([pid for pid in pids if alive(pid)])
                     record = json.loads((run_dir / "run.json").read_text())
                     self.assertEqual(record["status"], "interrupted")
+                    self.assertEqual([entry["status"] for entry in record["reviewers"]], ["interrupted"] * 2)
                     self.assertTrue(record["finished"])
                     self.assertEqual(stdout.splitlines()[-1], f"REVIEW_ARTIFACTS={run_dir}")
                 finally:
