@@ -192,7 +192,7 @@ class ManagerCore:
     def command_lock(self, selector: str | None, create: bool = False) -> Iterator[None]:
         """Resolve the target slot without a lock, lock it, reload, and fence against replacement while waiting."""
         if create:
-            slot, identity = self.current_slot(), None
+            slot, identity = self.current_slot(selector), None
         else:
             project = self.project(selector)
             slot, identity = project["slot"], (project.get("uuid"), project["name"])
@@ -319,12 +319,16 @@ class ManagerCore:
                     git(self.repo, "worktree", "add", "-b", slot, str(path), "main")
             print(f"Initialized {self.repo} with slots {SLOT_NAMES[0]} through {SLOT_NAMES[-1]} at {self.slots}")
 
-    def current_slot(self) -> str:
+    def current_slot(self, selector: str | None = None) -> str:
+        if selector is not None:
+            if selector not in SLOT_NAMES:
+                raise ProjectError("Project creation requires a coordinator slot selector: p1 through p10.")
+            return selector
         cwd = Path.cwd().resolve()
         for slot in SLOT_NAMES:
             if inside(cwd, self.slots / slot):
                 return slot
-        raise ProjectError(f"Enter a coordinator slot under {self.slots} to create a project.")
+        raise ProjectError(f"Enter a coordinator slot under {self.slots} to create a project, or pass --selector p1..p10.")
 
     @staticmethod
     def selector_for(project: dict[str, Any]) -> str:

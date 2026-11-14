@@ -49,6 +49,7 @@ def task_project_guard(manager: Any, project: dict[str, Any], board: Any,
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="baton", description="Local project coordination across independent Git repositories.")
     commands = parser.add_subparsers(dest="command", required=True)
+    selector_help = "Project UUID, name, or coordinator slot (default: current project)"
     commands.add_parser("config", help="Show or configure project storage roots")
     commands.add_parser("skills", help="Install or update bundled agent skills")
     commands.add_parser("doctor", help="Check installation freshness, paths, and configured review models")
@@ -80,16 +81,16 @@ def build_parser() -> argparse.ArgumentParser:
                                                       "variable, when it has one; see provider_guidance)")
     create = commands.add_parser("create")
     create.add_argument("name")
+    create.add_argument("--selector", choices=SLOT_NAMES, help="Target coordinator slot (default: current slot)")
     inputs = create.add_mutually_exclusive_group(required=True)
     inputs.add_argument("-r", "--repos", nargs="+")
     inputs.add_argument("--from", dest="from_uuid", metavar="FULL_UUID")
     add = commands.add_parser("add")
     add.add_argument("repos", nargs="+")
+    add.add_argument("--selector", help=selector_help)
     rename = commands.add_parser("rename")
     rename.add_argument("name")
-    rename.add_argument("selector", nargs="?")
     status = commands.add_parser("status")
-    status.add_argument("selector", nargs="?")
     status.add_argument("--json", action="store_true",
                         help="Machine-readable project view; exits 3 with empty stdout outside a project")
     status.add_argument("--all", action="store_true", help="Also display retired members")
@@ -106,6 +107,7 @@ def build_parser() -> argparse.ArgumentParser:
     path = commands.add_parser("path")
     path.add_argument("selector", nargs="?")
     path.add_argument("repo", nargs="?")
+    path.add_argument("--selector", dest="explicit_selector", metavar="PROJECT", help=selector_help)
     path.add_argument("--member", help="Registered member (first checkout is the default)")
     stack = commands.add_parser("stack", help="Inspect native stack groups")
     stack_commands = stack.add_subparsers(dest="stack_action", required=True)
@@ -245,15 +247,18 @@ def build_parser() -> argparse.ArgumentParser:
                                  help="Commit locally without syncing with or pushing to origin")
     artifact_commit.add_argument("paths", nargs="+", metavar="PATH", help="Paths inside the project's artifact directory")
     abandon = commands.add_parser("abandon")
-    abandon.add_argument("selector", nargs="?")
     cleanup = commands.add_parser("cleanup")
-    cleanup.add_argument("selector", nargs="?")
     cleanup.add_argument("--dry-run", action="store_true")
     cleanup.add_argument("--force", action="store_true",
                          help="Warn and confirm best-effort local cleanup; fail only if the slot cannot be safely released")
     cleanup.add_argument("--allow-unmerged", action="append", default=[], metavar="REPO[:MEMBER]",
                          help="Preserve unmerged tips under archive refs and remove the worktrees without a merged-PR "
                               "check, for a whole repository or one member (root names an unnamed first checkout)")
+    for command in (status, rename, abandon, cleanup):
+        selection = command.add_mutually_exclusive_group()
+        # An absent positional must not overwrite the value supplied by --selector.
+        selection.add_argument("selector", nargs="?", default=argparse.SUPPRESS, metavar="PROJECT")
+        selection.add_argument("--selector", help=selector_help)
     return parser
 
 
@@ -276,7 +281,14 @@ def main() -> int:
     if sys.argv[1:3] == ["retro", "summarize"]:
         from .retro_summary import summary_main
         return summary_main(sys.argv[3:])
-    args = build_parser().parse_args()
+    parser = build_parser()
+    args = parser.parse_args()
+    if args.command == "path" and args.explicit_selector is not None:
+        if args.repo is not None:
+            parser.error("path --selector accepts at most one positional repository")
+        args.repo, args.selector = args.selector, args.explicit_selector
+    if getattr(args, "selector", None) is not None and not args.selector.strip():
+        parser.error("Project selector must not be empty")
     manager = None
     try:
         if args.command == "retro" and args.retro_action in ("pending", "summarize"):
@@ -309,7 +321,7 @@ def main() -> int:
         with (manager.command_lock(getattr(args, "selector", None), create=args.command == "create")
               if mutation else contextlib.nullcontext()):
             if args.command == "create":
-                manager.create(args.name, args.repos, from_uuid=args.from_uuid)
+                manager.create(args.name, args.repos, from_uuid=args.from_uuid, selector=args.selector)
             elif args.command == "search":
                 from .search import render_search
                 result = manager.search_projects(args.query, state=args.state, limit=args.limit)
@@ -329,7 +341,7 @@ def main() -> int:
             elif args.command == "open-plan":
                 return manager.open_plan(args.selector)
             elif args.command == "add":
-                manager.add(args.repos)
+                manager.add(args.repos, args.selector)
             elif args.command == "rename":
                 manager.rename(args.name, args.selector)
             elif args.command == "stack":
@@ -449,7 +461,7 @@ def main() -> int:
                     project = manager.project(args.selector)
                     repo_id = args.repo
                 except NoProject:
-                    if args.repo or not args.selector:
+                    if args.explicit_selector is not None or args.repo or not args.selector:
                         raise
                     project, repo_id = manager.project(), args.selector
                 if not repo_id:

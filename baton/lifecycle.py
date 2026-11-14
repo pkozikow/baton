@@ -29,13 +29,14 @@ def manifest_message(name: str, previous: str, manifest: dict[str, Any]) -> str:
 
 
 class LifecycleMixin(ManagerCore):
-    def create(self, name: str, repos: list[str] | None, *, from_uuid: str | None = None) -> None:
+    def create(self, name: str, repos: list[str] | None, *, from_uuid: str | None = None,
+               selector: str | None = None) -> None:
         follow_up = None
         if from_uuid is not None:
             if name != "follow-up" or repos is not None:
                 raise ProjectError("Use baton create follow-up --from FULL_UUID, or baton create NAME --repos REPOS.")
             # Matching interrupted creation must precede fresh artifact/coordinator checks.
-            existing = self.state["projects"].get(self.current_slot())
+            existing = self.state["projects"].get(self.current_slot(selector))
             if existing and existing["state"] == "creating" and existing.get("follow_up_from") == from_uuid:
                 self.finish_create(existing)
                 return
@@ -45,7 +46,7 @@ class LifecycleMixin(ManagerCore):
         assert repos is not None
         if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]*", name):
             raise ProjectError("Project name must be a simple letters/digits/dashes/underscores slug.")
-        slot = self.current_slot()
+        slot = self.current_slot(selector)
         existing = self.state["projects"].get(slot)
         if existing:
             if existing["state"] == "creating" and existing["name"] == name and existing["requested"] == repos and existing.get("follow_up_from") == from_uuid:
@@ -209,8 +210,8 @@ class LifecycleMixin(ManagerCore):
         self.save()
         print(f"Project {project['name']} ready in {coordinator}")
 
-    def add(self, names: list[str]) -> None:
-        project = self.project()
+    def add(self, names: list[str], selector: str | None = None) -> None:
+        project = self.project(selector)
         if project["state"] == "adding" and project.get("pending_add") == names:
             self.materialize(project)
             return
