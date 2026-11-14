@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+- Model tiers carry a reasoning effort. `baton config set --model-tier-effort
+  PROVIDER.TIER=EFFORT` saves one in `model_tier_effort` (`--remove-model-tier-effort
+  PROVIDER[.TIER]` removes it), and a tier without one resolves to `high`. Changes
+  for existing configurations:
+  - Claude and agy reviews whose model is a tier now pass `--effort` (`high` unless
+    saved otherwise). An agy tier mapped to a model ID that ends in another effort,
+    such as `MODEL-medium`, fails until that effort is saved for the tier.
+  - Codex reviews whose model is a tier use the tier's effort instead of
+    `CODEX_REASONING_EFFORT` or Codex's `config.toml`; `<PREFIX>_CODEX_REASONING`
+    still overrides it. Selections of a literal model or `default` are unchanged.
+  - Codex accepts `none`, `xhigh` and `max` from every source, so a `config.toml`
+    holding one of them no longer stops a review; `xhigh` and `max` fall back to
+    `high`, `medium`, then `low`.
+  - `baton status --json` and `baton config show` report `resolved_worker_effort`
+    (also as a `--section`), worker model guidance names the effort, and `config
+    show` lists `model_tier_effort`.
+  - `baton doctor` runs each tier target at exactly its effort, without Codex's
+    fallback or the per-run override, and names those checks
+    `model:PROVIDER:MODEL@EFFORT`.
+  - Cursor has no effort setting; its model IDs carry the effort.
+
 ## 0.1.0
 
 Initial public release.

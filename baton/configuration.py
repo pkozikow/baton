@@ -16,8 +16,8 @@ from .errors import ProjectError
 from .gitutil import write_json
 from .review_loop import effective_review_loop, review_focus_catalog, resolved_focused_review_models, review_project
 from .providers import (MODEL_OPTIONS, MODEL_TIERS, REVIEW_MODEL_OPTIONS, default_review_models, effective_models,
-                        provider_settings, resolved_models, validate_model_tiers,
-                        validate_review_models)
+                        provider_settings, resolved_models, resolved_worker_efforts, validate_model_tier_effort,
+                        validate_model_tiers, validate_review_models, validate_tier_names)
 
 
 PATH_OPTIONS = ("projects_repo", "slots_root", "worktrees_root", "repos_root", "artifacts_root")
@@ -92,11 +92,48 @@ def read_config(*, validate_model_references: bool = True) -> dict[str, Any]:
     configured_branch_prefix(config)
     validate_repo_aliases(config.get("repo_aliases", {}))
     validate_model_tiers(config.get("model_tiers", {}))
+    validate_model_tier_effort(config.get("model_tier_effort", {}))
     for key in MODEL_OPTIONS:
         validate_review_models(key, config.get(key, {}))
         if validate_model_references:
             effective_models(config, key)
     return config
+
+
+def _tier_changes(key: str, flag: str, value_name: str, assignments: list[str],
+                  removals: list[str]) -> tuple[dict[str, dict[str, str]], dict[str, set[str]]]:
+    """Parses repeatable ``PROVIDER.TIER=VALUE`` assignments and ``PROVIDER[.TIER]`` removals of per-tier map ``key``."""
+    changes: dict[str, dict[str, str]] = {}
+    for value in assignments:
+        name, separator, target = value.partition("=")
+        provider, dot, tier = name.partition(".")
+        if not separator or not dot:
+            raise ValueError(f"--{flag} must use PROVIDER.TIER={value_name}")
+        changes.setdefault(provider, {})[tier] = target
+    removed: dict[str, set[str]] = {}
+    for value in removals:
+        provider, dot, tier = value.partition(".")
+        if dot and not tier:
+            raise ValueError(f"--remove-{flag} must use PROVIDER or PROVIDER.TIER")
+        tiers = {tier} if dot else set(MODEL_TIERS)
+        validate_tier_names(key, {provider: dict.fromkeys(tiers)})
+        removed.setdefault(provider, set()).update(tiers)
+        if tiers & set(changes.get(provider, {})):
+            raise ValueError(f"Cannot set and remove the same {flag.replace('-', ' ')} for {provider} in one command")
+    return changes, removed
+
+
+def _apply_tier_changes(config: dict[str, Any], key: str, changes: dict[str, dict[str, str]],
+                        removed: dict[str, set[str]]) -> None:
+    saved = config.get(key, {})
+    for provider, tiers in removed.items():
+        if provider in saved:
+            for tier in tiers:
+                saved[provider].pop(tier, None)
+            if not saved[provider]:
+                saved.pop(provider)
+    for provider, mappings in changes.items():
+        config.setdefault(key, {}).setdefault(provider, {}).update(mappings)
 
 
 def save_config(config: dict[str, Any]) -> None:
@@ -112,7 +149,8 @@ def main(argv: list[str] | None = None) -> int:
     initializer = commands.add_parser("init", help="Initialize model and review-loop defaults while preserving saved settings")
     setter = commands.add_parser("set", help="Save paths, branch prefix, aliases, models, and review-loop settings")
     shower.add_argument("--selector")
-    shower.add_argument("--section", action="append", choices=("paths", "branch_prefix", "providers", "worker_model", "resolved_worker_model"))
+    shower.add_argument("--section", action="append", choices=("paths", "branch_prefix", "providers", "worker_model",
+                                                               "resolved_worker_model", "resolved_worker_effort"))
     initializer.add_argument("--preserve-review-loop", action="store_true")
     setter.add_argument("--selector")
     setter.add_argument("--inherit-review-loop", action="store_true")
@@ -127,6 +165,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="Map strong, medium, or weak to an actual provider model (repeatable)")
     setter.add_argument("--remove-model-tier", action="append", default=[], metavar="PROVIDER[.TIER]",
                         help="Remove one tier mapping, or all of a provider's tiers (repeatable)")
+    setter.add_argument("--model-tier-effort", action="append", default=[], metavar="PROVIDER.TIER=EFFORT",
+                        help="Set the reasoning effort a tier carries (repeatable; default high)")
+    setter.add_argument("--remove-model-tier-effort", action="append", default=[], metavar="PROVIDER[.TIER]",
+                        help="Remove one tier's effort, or all of a provider's tier efforts (repeatable)")
     setter.add_argument("--branch-prefix", help="Namespace for new projects (default: baton)")
     focused_reviews = setter.add_mutually_exclusive_group()
     focused_reviews.add_argument("--review-focus", action="append", metavar="NAME",
@@ -165,6 +207,8 @@ def main(argv: list[str] | None = None) -> int:
                 metadata["worker_model"] = effective_models(raw, "worker_model")
             if "resolved_worker_model" in args.section:
                 metadata["resolved_worker_model"] = resolved_models(raw, "worker_model")
+            if "resolved_worker_effort" in args.section:
+                metadata["resolved_worker_effort"] = resolved_worker_efforts(raw)
             print(json.dumps(metadata, indent=2))
             return 0
         config = read_config(validate_model_references=args.action != "set")
@@ -192,7 +236,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.clear_focused_review_models and (args.focused_review_model or args.remove_focused_review_model):
                 raise ValueError("--clear-focused-review-models is exclusive with model assignment/removal")
             if args.selector and (args.repo_alias or args.remove_repo_alias or args.model_tier
-                    or args.remove_model_tier or args.branch_prefix is not None or any(getattr(args, key) is not None for key in PATH_OPTIONS)
+                    or args.remove_model_tier or args.model_tier_effort or args.remove_model_tier_effort
+                    or args.branch_prefix is not None or any(getattr(args, key) is not None for key in PATH_OPTIONS)
                     or any(getattr(args, key) or getattr(args, "remove_" + key) for key in MODEL_OPTIONS)):
                 raise ValueError("Project --selector accepts only review-loop flags")
             changes = {key: str(getattr(args, key).expanduser().resolve())
@@ -215,26 +260,15 @@ def main(argv: list[str] | None = None) -> int:
                     model_changes[key] = additions
                 if removals:
                     model_removals[key] = removals
-            tier_changes = {}
-            for value in args.model_tier:
-                name, separator, model = value.partition("=")
-                provider, dot, tier = name.partition(".")
-                if not separator or not dot:
-                    raise ValueError("--model-tier must use PROVIDER.TIER=MODEL")
-                tier_changes.setdefault(provider, {})[tier] = model
+            tier_changes, tier_removals = _tier_changes("model_tiers", "model-tier", "MODEL", args.model_tier,
+                                                        args.remove_model_tier)
             validate_model_tiers(tier_changes)
-            tier_removals: dict[str, set[str]] = {}
-            for value in args.remove_model_tier:
-                provider, dot, tier = value.partition(".")
-                if dot and not tier:
-                    raise ValueError("--remove-model-tier must use PROVIDER or PROVIDER.TIER")
-                tiers = {tier} if dot else set(MODEL_TIERS)
-                validate_model_tiers({provider: dict.fromkeys(tiers, "model")})
-                tier_removals.setdefault(provider, set()).update(tiers)
-                if tiers & set(tier_changes.get(provider, {})):
-                    raise ValueError(f"Cannot set and remove the same model tier for {provider} in one command")
+            effort_changes, effort_removals = _tier_changes("model_tier_effort", "model-tier-effort", "EFFORT",
+                                                            args.model_tier_effort, args.remove_model_tier_effort)
+            validate_model_tier_effort(effort_changes)
             if (not changes and not args.repo_alias and not args.remove_repo_alias and not model_changes
-                    and not model_removals and not tier_changes and not tier_removals and args.branch_prefix is None
+                    and not model_removals and not tier_changes and not tier_removals and not effort_changes
+                    and not effort_removals and args.branch_prefix is None
                     and not loop_mutation and not args.inherit_review_loop):
                 parser.error("specify at least one path, branch prefix, alias, model, tier, or review-loop change")
             aliases = dict(config.get("repo_aliases", {}))
@@ -264,15 +298,8 @@ def main(argv: list[str] | None = None) -> int:
                     for provider in model_removals.get(key, ()):
                         models.pop(provider, None)
                     models.update(model_changes.get(key, {}))
-            saved_tiers = config.get("model_tiers", {})
-            for provider, tiers in tier_removals.items():
-                if provider in saved_tiers:
-                    for tier in tiers:
-                        saved_tiers[provider].pop(tier, None)
-                    if not saved_tiers[provider]:
-                        saved_tiers.pop(provider)
-            for provider, mappings in tier_changes.items():
-                config.setdefault("model_tiers", {}).setdefault(provider, {}).update(mappings)
+            _apply_tier_changes(config, "model_tiers", tier_changes, tier_removals)
+            _apply_tier_changes(config, "model_tier_effort", effort_changes, effort_removals)
             def apply_loop(target: dict[str, Any]) -> None:
                 if args.inherit_review_loop:
                     target.pop("review_loop", None)
@@ -355,6 +382,8 @@ def main(argv: list[str] | None = None) -> int:
             "artifacts_root": str(manager.artifacts)}, "repo_aliases": dict(manager.repo_aliases),
             "branch_prefix": manager.branch_prefix,
             "providers": provider_settings(), "model_tiers": config.get("model_tiers", {}),
+            "model_tier_effort": config.get("model_tier_effort", {}),
+            "resolved_worker_effort": resolved_worker_efforts(config),
             "review_loop": config.get("review_loop", {}) if preserve else effective_review_loop(config, project),
             "project_review_loop": None if project is None else project.get("review_loop", {}),
             **({} if preserve else {"review_focus_catalog": review_focus_catalog(),

@@ -9,15 +9,18 @@ apply to active-project owners and branch/mutating workers.
 Read `baton status --json`. In a project, apply a model preference only when
 `worker_model_guidance[<launching harness>]` exists; status filters it by the
 owner's provider. Take the concrete ID from `resolved_worker_model[<harness>]`,
-not the guidance prose or unresolved model map. Other providers' map entries do
-not grant guidance. If status exits 3, use
-`baton config show --section resolved_worker_model --section providers`;
+not the guidance prose or unresolved model map, and its reasoning effort from
+`resolved_worker_effort[<harness>]` (`null` means none). Other providers' map
+entries do not grant guidance. If status exits 3, use
+`baton config show --section resolved_worker_model --section resolved_worker_effort --section providers`;
 this lookup does not validate unrelated review-loop settings. Report other errors.
 
 Pass a non-default ID explicitly through the runtime's model selector, even if
-the parent uses another model. `default` or missing guidance gives no model
-override. Explicit user instructions prevail. Report an unsupported model
-selector before dispatch rather than silently substituting. These preferences
+the parent uses another model, and a non-null effort through its effort
+selector. `default` or missing guidance gives no model or effort override.
+Explicit user instructions prevail. Report an unsupported model selector before
+dispatch rather than silently substituting. A runtime with no effort selector
+dispatches with the model alone; say so in your report. These preferences
 select workers, not owners or the review CLIs' separately configured models.
 
 Follow `provider_guidance[<harness>].fresh_subagent` from status (outside a

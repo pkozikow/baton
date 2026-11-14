@@ -51,6 +51,9 @@ if behavior == 'timeout' and provider == 'codex':
     time.sleep(60)
 if behavior == 'budget' and provider == 'codex':
     time.sleep(1.2)
+if behavior == 'reject_xhigh' and 'model_reasoning_effort="xhigh"' in args:
+    print('unsupported reasoning effort', file=sys.stderr)
+    raise SystemExit(7)
 if behavior == 'wrong':
     nonce = 'wrong output'
 if behavior == 'echo':
@@ -125,6 +128,33 @@ class DoctorSmokeTests(unittest.TestCase):
         self.assertIn('--trust', cursor['args'])
         self.assertNotIn('--force', cursor['args'])
         self.assertNotIn('--yolo', cursor['args'])
+
+    def test_tier_targets_run_with_their_effort_and_without_codex_fallback(self) -> None:
+        config = {'plan_review_model': {'codex': 'strong', 'claude': 'opus', 'agy': 'weak'},
+                  'implementation_review_model': {'codex': 'astra', 'claude': 'opus', 'agy': 'weak'},
+                  'model_tiers': {'codex': {'strong': 'astra', 'medium': 'astra', 'weak': 'astra'},
+                                  'claude': {'strong': 'opus'}, 'agy': {'weak': 'gemini'}},
+                  'model_tier_effort': {'codex': {'medium': 'xhigh'}, 'claude': {'strong': 'max'}}}
+        # Per-run review settings, even invalid ones, neither replace a tier's effort nor hide its rejection.
+        os.environ.update(PEER_REVIEW_CODEX_AUTO_FALLBACK='2', PEER_REVIEW_CODEX_REASONING='bogus',
+                          DOCTOR_BEHAVIOR='reject_xhigh')
+        checks = model_checks(config)
+
+        def effort(call: dict) -> str | None:
+            args = call['args']
+            if call['provider'] == 'codex':
+                return args[args.index('--config') + 1].split('"')[1]
+            return args[args.index('--effort') + 1] if '--effort' in args else None
+
+        # Tiers sharing a model are one case per effort; a literal selection of a tier target adds none.
+        self.assertCountEqual([(call['provider'], effort(call)) for call in self.calls()],
+                              [('codex', 'high'), ('codex', 'xhigh'), ('claude', 'max'), ('agy', 'high')])
+        failed = [check for check in checks if check['status'] != 'pass']
+        self.assertEqual([check['name'] for check in failed], ['model:codex:astra@xhigh'])
+        self.assertIn("'astra' at reasoning effort xhigh", failed[0]['message'])
+        self.assertCountEqual([check['name'] for check in checks if check['status'] == 'pass'],
+                              ['models:configuration', 'model:codex:astra@high', 'model:claude:opus@max',
+                               'model:agy:gemini@high'])
 
     def test_cursor_mapping_alone_opts_it_in(self) -> None:
         checks = model_checks({'model_tiers': {'cursor': {'weak': 'composer'}}})

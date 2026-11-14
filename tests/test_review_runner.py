@@ -484,6 +484,42 @@ class PlanReviewGoldenTest(ReviewRunnerFixture):
         self.assertTrue((run_dir / "golden-plan-review-codex-vendor-x-y.md").is_file())
         self.assertIn("codex model: vendor/x y", result.stdout.splitlines())
 
+    def test_tier_selections_carry_their_effort_to_every_reviewer(self) -> None:
+        self.config.write_text(json.dumps({
+            "plan_review_model": {"claude": "strong", "codex": "strong", "agy": "medium", "cursor": "strong"},
+            "model_tiers": {"claude": {"strong": "opus"}, "codex": {"strong": "gpt"}, "agy": {"medium": "gem"},
+                            "cursor": {"strong": "comp"}},
+            "model_tier_effort": {"claude": {"strong": "xhigh"}, "codex": {"strong": "max"}}}))
+        # A tier's effort replaces the ambient Codex settings.
+        (self.codex_home / "config.toml").write_text('model_reasoning_effort = "low"\n')
+        self.env["CODEX_REASONING_EFFORT"] = "minimal"
+        result = self.plan_review(reviewers=None)
+        run_dir = self.run_dir(result)
+        calls = self.all_calls()
+        self.assertEqual(calls["claude"][0]["args"][len(CLAUDE_REVIEW_ARGS) + 2:],
+                         ["--model", "opus", "--effort", "xhigh", "--",
+                          (run_dir / "golden-plan-review.prompt.txt").read_text()])
+        self.assertEqual(calls["codex"][0]["args"][1:5], ["--model", "gpt", "--config", 'model_reasoning_effort="max"'])
+        # agy's tier has no saved effort, so it gets the default.
+        self.assertEqual(calls["agy"][0]["args"][8:12], ["--model", "gem", "--effort", "high"])
+        # Cursor has no effort control.
+        self.assertEqual(calls["cursor"][0]["args"][6:], ["--model", "comp"])
+        self.assertEqual({name: self.reviewer(result, name)["attempts"][0].get("reasoning") for name in calls},
+                         {"claude": "xhigh", "codex": "max", "agy": "high", "cursor": None})
+
+    def test_codex_run_variable_overrides_a_tier_effort_which_falls_back_from_xhigh(self) -> None:
+        self.config.write_text(json.dumps({"plan_review_model": {"codex": "weak"},
+                                           "model_tiers": {"codex": {"weak": "gpt"}},
+                                           "model_tier_effort": {"codex": {"weak": "xhigh"}}}))
+        self.env["STUB_CODEX"] = "fail_reasoning:xhigh"
+        self.plan_review(reviewers="codex")
+        self.assertEqual([call["args"][4] for call in self.calls("codex")],
+                         ['model_reasoning_effort="xhigh"', 'model_reasoning_effort="high"'])
+        (self.root / "codex.calls").unlink()
+        self.env["PLAN_REVIEW_CODEX_REASONING"] = "none"
+        self.plan_review(reviewers="codex")
+        self.assertEqual([call["args"][4] for call in self.calls("codex")], ['model_reasoning_effort="none"'])
+
     def test_unknown_and_empty_reviewer_lists_stop_before_the_run(self) -> None:
         for reviewers, message in (
                 ("codex,cluade", "Error: unknown reviewer 'cluade'; configured providers: codex,claude,agy,cursor."),
@@ -524,9 +560,9 @@ class PlanReviewGoldenTest(ReviewRunnerFixture):
             ({"PLAN_REVIEW_CLAUDE_TIMEOUT_SECS": "soon"}, "claude",
              "Error: PLAN_REVIEW_CLAUDE_TIMEOUT_SECS must be a non-negative integer."),
             ({"PLAN_REVIEW_CODEX_REASONING": "extreme"}, "claude,codex",
-             "Error: PLAN_REVIEW_CODEX_REASONING must be one of: minimal, low, medium, high"),
+             "Error: PLAN_REVIEW_CODEX_REASONING must be one of: none, minimal, low, medium, high, xhigh, max"),
             ({"CODEX_REASONING_EFFORT": "extreme"}, "codex",
-             "Error: PLAN_REVIEW_CODEX_REASONING must be one of: minimal, low, medium, high"),
+             "Error: PLAN_REVIEW_CODEX_REASONING must be one of: none, minimal, low, medium, high, xhigh, max"),
             ({"PLAN_REVIEW_CODEX_AUTO_FALLBACK": "2"}, "codex", "Error: PLAN_REVIEW_CODEX_AUTO_FALLBACK must be 0 or 1"),
             ({"PLAN_REVIEW_TIMEOUT_SECS": "-1"}, "claude", "Error: PLAN_REVIEW_TIMEOUT_SECS must be a non-negative integer."),
             ({"PLAN_REVIEW_MAX_PLAN_BYTES": "lots"}, "claude",
@@ -1284,6 +1320,33 @@ class PeerReviewGoldenTest(ReviewRunnerFixture):
         self.assertEqual({call["args"][2] for call in self.calls("codex")}, {"secure-model", "fast-model"})
         self.assertEqual(self.config.read_text(), saved)
         self.assertFalse((self.repo / "SHOULD_NOT_EXIST").exists())
+
+    def test_focused_overrides_decide_the_effort(self) -> None:
+        self.commit()
+        self.config.write_text(json.dumps({
+            "implementation_review_model": {"codex": "strong", "claude": "strong"},
+            "model_tiers": {"codex": {"strong": "big", "weak": "small"}, "claude": {"strong": "opus"}},
+            "model_tier_effort": {"codex": {"strong": "max", "weak": "low"}, "claude": {"strong": "xhigh"}},
+            "review_loop": {"focused_review_models": {"security": {"codex": "weak", "claude": "direct"},
+                                                       "performance": {"codex": "default"}}}}))
+        (self.codex_home / "config.toml").write_text('model_reasoning_effort = "medium"\n')
+
+        def efforts(*args: str) -> tuple[list[str], list[str]]:
+            for name in ("codex", "claude"):
+                (self.root / f"{name}.calls").unlink(missing_ok=True)
+            self.peer_review("codex,claude", *args, "main")
+            codex, claude = self.calls("codex")[0]["args"], self.calls("claude")[0]["args"]
+            return ([value for value in codex if value in ("--model", "big", "small") or "reasoning" in value],
+                    claude[claude.index("--session-id") + 2:claude.index("--add-dir")])
+
+        self.assertEqual(efforts(), (["--model", "big", 'model_reasoning_effort="max"'],
+                                     ["--model", "opus", "--effort", "xhigh"]))
+        # Another tier brings its own effort; a literal model drops the effort.
+        self.assertEqual(efforts("--focus-area", "security"),
+                         (["--model", "small", 'model_reasoning_effort="low"'], ["--model", "direct"]))
+        # ``default`` drops it too, so Codex's own settings apply again; claude keeps its normal tier.
+        self.assertEqual(efforts("--focus-area", "performance"),
+                         (['model_reasoning_effort="medium"'], ["--model", "opus", "--effort", "xhigh"]))
 
     def test_reviewer_errors_precede_run_dir_fetch_and_empty_diff(self) -> None:
         # No diff and an unreachable remote: the reviewer error must win over both.

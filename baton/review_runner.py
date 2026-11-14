@@ -30,7 +30,8 @@ from . import review_records
 from .configuration import configured_branch_prefix, effective_paths, read_config, read_raw_config
 from .errors import NoProject, ProjectError
 from .providers import (PROVIDERS, REVIEW_KILL_GRACE_SECS, ProcessGroups, Provider, ReviewRequest, _nonempty, process_start,
-                        kill_groups_on_signals, resolved_review_models, slugify)
+                        effective_review_models, kill_groups_on_signals, resolve_review_model, resolved_review_models,
+                        slugify, tier_effort)
 from .review_records import write_record
 
 
@@ -144,16 +145,16 @@ def prepare(kind: str, reviewers_csv: str, environ: Mapping[str, str], warnings:
     key = f"{kind}_review_model"
     try:
         config = read_config()
-        models = resolved_review_models(config, key)
+        configured = resolved_review_models(config, key)
+        # Each provider's selection and the model it resolves to; the selection decides the effort.
+        selections, models = effective_review_models(config, key), configured
         if focus_area is not None:
             if kind != "implementation":
                 raise ValueError("--focus-area is only supported for implementation reviews")
-            focused = focused_context(focus_area, selector, config)["resolved_models"]
-        else:
-            focused = None
+            _, selections, models = _focus(focus_area, selector, config)
     except (OSError, ValueError, ProjectError) as error:
         raise ReviewError(f"baton config: {error}") from None
-    requested = [name for name in reviewers_csv.split(",") if name] if reviewers_csv else list(models)
+    requested = [name for name in reviewers_csv.split(",") if name] if reviewers_csv else list(configured)
     for name in requested:
         if name not in PROVIDERS:
             raise ReviewError(f"unknown reviewer '{name}'; configured providers: {','.join(PROVIDERS)}.")
@@ -166,10 +167,11 @@ def prepare(kind: str, reviewers_csv: str, environ: Mapping[str, str], warnings:
         variable = f"{prefix}_{provider.env_name}_TIMEOUT_SECS"
         timeout = _non_negative(variable, environ[variable]) if environ.get(variable) else default_timeout
         try:
-            options = provider.review_options(prefix, environ)
+            options = provider.review_options(prefix, environ, tier_effort(
+                name, selections.get(name, "default"), config.get("model_tier_effort", {})))
         except ValueError as error:
             raise ReviewError(str(error)) from None
-        model = (focused or models).get(name, "default")
+        model = models.get(name, "default")
         executable = provider.executable(environ)
         found = shutil.which(executable)
         if found is None:
@@ -184,15 +186,23 @@ def prepare(kind: str, reviewers_csv: str, environ: Mapping[str, str], warnings:
     return reviewers, skipped
 
 
-def focused_context(area: str, selector: str | None = None, config: dict | None = None) -> dict:
-    from .review_loop import review_focus_catalog, resolved_focused_review_models, review_project
+def _focus(area: str, selector: str | None, config: dict | None) -> tuple[str, dict[str, str], dict[str, str]]:
+    """A focus area's guidance, then each provider's model selection and the model it resolves to."""
+    from .review_loop import focused_review_selections, review_focus_catalog, review_project
 
     catalog = review_focus_catalog()
     if area not in catalog:
         raise ValueError(f"unknown focus area {area!r}; valid names: {', '.join(catalog)}")
-    models = resolved_focused_review_models(config if config is not None else read_config(),
-                                            review_project(selector))
-    return {"focus_area": area, "guidance": catalog[area], "resolved_models": models[area]}
+    config = config if config is not None else read_config()
+    selections = focused_review_selections(config, review_project(selector))[area]
+    tiers = config.get("model_tiers", {})
+    return catalog[area], selections, {provider: resolve_review_model(provider, model, tiers)
+                                       for provider, model in selections.items()}
+
+
+def focused_context(area: str, selector: str | None = None, config: dict | None = None) -> dict:
+    guidance, _, models = _focus(area, selector, config)
+    return {"focus_area": area, "guidance": guidance, "resolved_models": models}
 
 
 def heading_validator(label: str, headings: tuple[str, ...]) -> Callable[[Path], str | None]:
@@ -853,7 +863,8 @@ fetch is only a warning.
 
 A rate-limited reviewer, or one that hit a transient server or network error, is retried once
 within its timeout. Models come from plan_review_model / implementation_review_model (see baton
-config show); strong, medium and weak resolve through model_tiers.
+config show); strong, medium and weak resolve through model_tiers and carry the tier's reasoning
+effort from model_tier_effort (default: high), passed to codex, claude and agy.
 
 Environment (PREFIX is PLAN_REVIEW or PEER_REVIEW):
   <PREFIX>_REVIEWERS                 CSV override of the configured reviewers (--reviewers wins)
@@ -863,7 +874,8 @@ Environment (PREFIX is PLAN_REVIEW or PEER_REVIEW):
   PEER_REVIEW_MAX_INPUT_BYTES        Whole implementation input budget (default: 180000; 0 embeds everything)
   PEER_REVIEW_SKIP_FETCH=1           Skip git fetch
   PEER_REVIEW_FETCH_REMOTE           Remote to fetch (default: origin)
-  <PREFIX>_CODEX_REASONING           Codex reasoning (else CODEX_REASONING_EFFORT, Codex config, high)
+  <PREFIX>_CODEX_REASONING           Codex reasoning (else the tier's effort; without a tier,
+                                     CODEX_REASONING_EFFORT, Codex config, high)
   <PREFIX>_CODEX_AUTO_FALLBACK       Retry Codex at lower reasoning on failure (default: 1)
   <PROVIDER>_BIN                     Provider executable (see baton config show)
 """

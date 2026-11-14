@@ -15,7 +15,7 @@ from .manifest import entries, member_name, entry_stack_root, link_name, subplan
 from .native import registered_stacks
 from .core import ManagerCore
 from .configuration import read_config
-from .providers import effective_worker_models, provider_guidance, resolved_worker_models
+from .providers import effective_worker_models, provider_guidance, resolved_worker_efforts, resolved_worker_models
 from .skills_install import bundled_skills
 
 
@@ -152,13 +152,17 @@ class StatusMixin(ManagerCore):
         config = read_config()
         worker_models = effective_worker_models(config)
         resolved_workers = resolved_worker_models(config)
+        worker_efforts = resolved_worker_efforts(config)
         owner = project.get("owner")
         worker_guidance = {
             provider: (f"When the owner delegates workers through {provider}, explicitly select model {model} "
-                       "instead of inheriting the owner's model. This is delegation guidance only; "
+                       + (f"with reasoning effort {worker_efforts[provider]} " if worker_efforts[provider] else "")
+                       + "instead of inheriting the owner's model. This is delegation guidance only; "
                        "it does not change the owner session or review models. "
                        "If the runtime cannot select this model, report the limitation before dispatching "
-                       "rather than silently using another model.")
+                       "rather than silently using another model."
+                       + (" If it has no reasoning effort selector, dispatch with the model alone and report that."
+                          if worker_efforts[provider] else ""))
             for provider, model in resolved_workers.items()
             if model != "default" and (owner is None or provider == owner["provider"])
         }
@@ -168,6 +172,7 @@ class StatusMixin(ManagerCore):
             "uuid": project["uuid"], "owner": project.get("owner"),
             **{key: project[key] for key in ("follow_up_from", "follow_up_path", "follow_up_root_name", "follow_up_number") if key in project},
             "worker_model": worker_models, "resolved_worker_model": resolved_workers,
+            "resolved_worker_effort": worker_efforts,
             "worker_model_guidance": worker_guidance,
             # Not owner-filtered: a non-owner agent needs its own provider's claim instructions.
             "provider_guidance": provider_guidance(),
