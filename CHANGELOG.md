@@ -18,7 +18,9 @@
   - `baton status --json` and `baton config show` report `resolved_worker_effort`
     (also as a `--section`), worker model guidance names the effort, and `config
     show` lists `model_tier_effort`.
-  - `baton doctor` runs each tier target at its effort, without Codex's fallback.
+  - `baton doctor` runs each tier target at exactly its effort, without Codex's
+    fallback or the per-run override, and names those checks
+    `model:PROVIDER:MODEL@EFFORT`.
   - Cursor has no effort setting; its model IDs carry the effort.
 
 ## 0.1.0

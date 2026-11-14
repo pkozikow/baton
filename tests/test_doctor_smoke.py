@@ -135,9 +135,9 @@ class DoctorSmokeTests(unittest.TestCase):
                   'model_tiers': {'codex': {'strong': 'astra', 'medium': 'astra', 'weak': 'astra'},
                                   'claude': {'strong': 'opus'}, 'agy': {'weak': 'gemini'}},
                   'model_tier_effort': {'codex': {'medium': 'xhigh'}, 'claude': {'strong': 'max'}}}
-        # The saved fallback switch would hide a rejected effort behind a lower one.
-        os.environ['PEER_REVIEW_CODEX_AUTO_FALLBACK'] = '1'
-        os.environ['DOCTOR_BEHAVIOR'] = 'reject_xhigh'
+        # Neither the fallback switch nor the per-run override may hide a rejected tier effort.
+        os.environ.update(PEER_REVIEW_CODEX_AUTO_FALLBACK='1', PEER_REVIEW_CODEX_REASONING='low',
+                          DOCTOR_BEHAVIOR='reject_xhigh')
         checks = model_checks(config)
 
         def effort(call: dict) -> str | None:
@@ -150,10 +150,11 @@ class DoctorSmokeTests(unittest.TestCase):
         self.assertCountEqual([(call['provider'], effort(call)) for call in self.calls()],
                               [('codex', 'high'), ('codex', 'xhigh'), ('claude', 'max'), ('agy', 'high')])
         failed = [check for check in checks if check['status'] != 'pass']
-        self.assertEqual([check['name'] for check in failed], ['model:codex:astra'])
+        self.assertEqual([check['name'] for check in failed], ['model:codex:astra@xhigh'])
         self.assertIn("'astra' at reasoning effort xhigh", failed[0]['message'])
-        self.assertIn("'gemini' at reasoning effort high",
-                      next(check for check in checks if check['name'] == 'model:agy:gemini')['message'])
+        self.assertCountEqual([check['name'] for check in checks if check['status'] == 'pass'],
+                              ['models:configuration', 'model:codex:astra@high', 'model:claude:opus@max',
+                               'model:agy:gemini@high'])
 
     def test_cursor_mapping_alone_opts_it_in(self) -> None:
         checks = model_checks({'model_tiers': {'cursor': {'weak': 'composer'}}})

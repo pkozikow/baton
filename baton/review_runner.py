@@ -145,16 +145,16 @@ def prepare(kind: str, reviewers_csv: str, environ: Mapping[str, str], warnings:
     key = f"{kind}_review_model"
     try:
         config = read_config()
-        models = resolved_review_models(config, key)
-        selections = effective_review_models(config, key)
-        focused = None
+        configured = resolved_review_models(config, key)
+        # Each provider's selection and the model it resolves to; the selection decides the effort.
+        selections, models = effective_review_models(config, key), configured
         if focus_area is not None:
             if kind != "implementation":
                 raise ValueError("--focus-area is only supported for implementation reviews")
-            _, selections, focused = _focus(focus_area, selector, config)
+            _, selections, models = _focus(focus_area, selector, config)
     except (OSError, ValueError, ProjectError) as error:
         raise ReviewError(f"baton config: {error}") from None
-    requested = [name for name in reviewers_csv.split(",") if name] if reviewers_csv else list(models)
+    requested = [name for name in reviewers_csv.split(",") if name] if reviewers_csv else list(configured)
     for name in requested:
         if name not in PROVIDERS:
             raise ReviewError(f"unknown reviewer '{name}'; configured providers: {','.join(PROVIDERS)}.")
@@ -171,7 +171,7 @@ def prepare(kind: str, reviewers_csv: str, environ: Mapping[str, str], warnings:
                 name, selections.get(name, "default"), config.get("model_tier_effort", {})))
         except ValueError as error:
             raise ReviewError(str(error)) from None
-        model = (focused or models).get(name, "default")
+        model = models.get(name, "default")
         executable = provider.executable(environ)
         found = shutil.which(executable)
         if found is None:

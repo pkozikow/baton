@@ -7,8 +7,8 @@ import unittest
 from unittest.mock import patch
 
 from baton.errors import ProjectError
-from baton.providers import (DEFAULT_TIER_EFFORT, PROMPT_ARGV, PROMPT_STDIN, PROVIDERS, UnsupportedProviderOperation,
-                             get_provider,
+from baton.providers import (DEFAULT_TIER_EFFORT, PROMPT_ARGV, PROMPT_STDIN, PROVIDERS, Provider,
+                             UnsupportedProviderOperation, get_provider,
                              provider_guidance, scrubbed_environment, session_variables)
 from baton.skills_install import FLOOR, default_targets, discovery_conflicts, unmanaged_copies
 
@@ -55,6 +55,9 @@ class ProviderContractTest(unittest.TestCase):
                 # A tier without a saved effort resolves to the default, so every effort control must accept it.
                 self.assertTrue(not entry.efforts or DEFAULT_TIER_EFFORT in entry.efforts)
                 self.assertTrue(entry.effort_flag is None or entry.efforts)
+                # The shared review invocation only knows the flag; any other delivery needs its own.
+                if entry.efforts and entry.effort_flag is None:
+                    self.assertIsNot(type(entry).run_review, Provider.run_review)
                 guidance = entry.guidance()
                 self.assertEqual(set(guidance), {"claim_command", "session_id_source", "fresh_subagent"})
                 self.assertTrue(all(guidance.values()), guidance)

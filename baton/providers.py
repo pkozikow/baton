@@ -281,9 +281,10 @@ class ReviewRequest:
         A ``temporary_cwd`` is a private directory the attempt removes when it ends, so it is recorded apart
         from ``cwd``.
         """
+        effort = self.options.get("reasoning")
         entry: dict[str, Any] = {"session_id": session_id, "log": str(log.absolute()),
                                  "cwd": None if temporary_cwd else str((self.cwd or Path.cwd()).absolute()),
-                                 "status": None, **details}
+                                 "status": None, **({"reasoning": effort} if effort else {}), **details}
         if temporary_cwd is not None:
             entry["temporary_cwd"] = str(temporary_cwd.absolute())
         with self.record_lock or contextlib.nullcontext():
@@ -305,12 +306,6 @@ class ReviewRequest:
         stream = self.messages or sys.stderr
         stream.write(text + "\n")
         stream.flush()
-
-
-def _reasoning_detail(request: ReviewRequest) -> dict[str, str]:
-    """The attempt-record detail for a reviewer launched with an explicit effort."""
-    effort = request.options.get("reasoning")
-    return {"reasoning": effort} if effort else {}
 
 
 @dataclass(frozen=True)
@@ -443,7 +438,7 @@ class Provider:
             stdin = request.combined_input
         else:
             command.append(request.prompt)
-        request.begin_attempt(session_id, request.log, **_reasoning_detail(request))
+        request.begin_attempt(session_id, request.log)
         with request.output.open("wb") as output, request.log.open("wb") as log:
             status = run_reviewer_command(command, request, stdin=stdin, stdout=output, stderr=log)
         request.update_attempt(status=status)
@@ -569,7 +564,7 @@ class CodexProvider(Provider):
         # A tier's effort is Baton policy, so only the per-run variable overrides it; the ambient Codex
         # settings apply to selections that carry no effort.
         reasoning = (environ.get(variable) or effort or environ.get("CODEX_REASONING_EFFORT")
-                     or codex_config_reasoning(environ) or DEFAULT_TIER_EFFORT)
+                     or codex_config_reasoning(environ) or "high")
         if reasoning not in CODEX_REASONING:
             raise ValueError(f"{variable} must be one of: {', '.join(CODEX_REASONING)}")
         fallback = environ.get(f"{prefix}_CODEX_AUTO_FALLBACK") or "1"
@@ -903,8 +898,7 @@ class AgyProvider(Provider):
                             progress[key] = usage[key]
                     request.update_attempt(progress=dict(progress))
 
-            request.begin_attempt(None, request.log, temporary_cwd=work, progress=dict(progress),
-                                  **_reasoning_detail(request))
+            request.begin_attempt(None, request.log, temporary_cwd=work, progress=dict(progress))
             with stream_path.open("rb") as events:
                 def observe(*, final: bool = False) -> bool:
                     nonlocal result, encoded, pending, failure

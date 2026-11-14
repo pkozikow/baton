@@ -30,10 +30,15 @@ def _snippet(text: str) -> str:
 SmokeCase = tuple[str, str, str | None]
 
 
+def _case_name(case: SmokeCase) -> str:
+    provider, model, effort = case
+    return f"model:{provider}:{model}" + (f"@{effort}" if effort else "")
+
+
 def _run_smoke_case(case: SmokeCase, timeout: int, processes: ProcessGroups) -> dict[str, Any]:
     provider, model, effort = case
     entry = PROVIDERS[provider]
-    name = f"model:{provider}:{model}"
+    name = _case_name(case)
     binary = entry.executable()
     executable = shutil.which(binary)
     if executable is None:
@@ -45,9 +50,10 @@ def _run_smoke_case(case: SmokeCase, timeout: int, processes: ProcessGroups) -> 
     except ValueError as error:
         return {"name": name, "status": "fail", "message": f"{provider} smoke test cannot run: {error}"}
     if effort is not None:
-        # A tier's effort must itself be accepted, so a rejected one may not pass at a lower fallback.
-        options = {**options, "auto_fallback": "0"}
-    at_effort = f" at reasoning effort {options['reasoning']}" if effort is not None else ""
+        # The check is whether the model accepts the tier's own effort, so neither the per-run override
+        # nor a lower fallback may stand in for it.
+        options = {**options, "reasoning": effort, "auto_fallback": "0"}
+    at_effort = f" at reasoning effort {effort}" if effort is not None else ""
     nonce = "BATON_DOCTOR_" + secrets.token_hex(12)
     prompt = ("This is a CLI connectivity smoke test. Do not use tools, read other files, or modify files. "
               f"Answer with exactly this text and nothing else: {nonce}")
@@ -71,7 +77,8 @@ def _run_smoke_case(case: SmokeCase, timeout: int, processes: ProcessGroups) -> 
         for path in sorted(root.glob("*.log")):
             logs.append(path.read_text(errors="replace"))
         message = (f"{provider} smoke test failed for {model!r}{at_effort} (exit {status})"
-                   if status else f"{provider} smoke response did not match the expected nonce for {model!r}")
+                   if status else
+                   f"{provider} smoke response did not match the expected nonce for {model!r}{at_effort}")
         diagnostic = _snippet("\n".join(logs))
         record = {"name": name, "status": "fail", "message": message}
         if diagnostic:
@@ -83,8 +90,8 @@ def _smoke_case(case: SmokeCase, timeout: int, processes: ProcessGroups) -> dict
     try:
         return _run_smoke_case(case, timeout, processes)
     except OSError as error:
-        provider, model, _ = case
-        return {"name": f"model:{provider}:{model}", "status": "fail",
+        provider = case[0]
+        return {"name": _case_name(case), "status": "fail",
                 "message": f"Cannot run {provider} smoke test: {error}"}
 
 
@@ -101,24 +108,17 @@ def model_checks(config: dict[str, Any], *, smoke: bool = True, timeout: int = 6
         validate_model_tiers(tiers)
         efforts = config.get("model_tier_effort", {})
         validate_model_tier_effort(efforts)
-        tier_efforts: dict[tuple[str, str], dict[str | None, None]] = {}
+        cases: dict[SmokeCase, None] = {}
         for provider, mapping in tiers.items():
             for tier, model in mapping.items():
-                tier_efforts.setdefault((provider, model), {})[tier_effort(provider, tier, efforts)] = None
-        cases: dict[SmokeCase, None] = {}
-
-        def add(provider: str, model: str) -> None:
-            for effort in tier_efforts.get((provider, model), {None: None}):
-                cases[provider, model, effort] = None
-
-        for key in REVIEW_MODEL_OPTIONS:
-            for provider, model in resolved_review_models(config, key).items():
-                add(provider, model)
-        for provider, model in resolved_worker_models(config).items():
-            if model != "default":
-                add(provider, model)
-        for provider, model in tier_efforts:
-            add(provider, model)
+                cases[provider, model, tier_effort(provider, tier, efforts)] = None
+        targets = {(provider, model) for provider, model, _ in cases}
+        selections = [pair for key in REVIEW_MODEL_OPTIONS for pair in resolved_review_models(config, key).items()]
+        selections += [pair for pair in resolved_worker_models(config).items() if pair[1] != "default"]
+        for provider, model in selections:
+            # A tier target is already checked at its tier's effort.
+            if (provider, model) not in targets:
+                cases[provider, model, None] = None
         if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
             raise ValueError("Smoke timeout must be a positive integer")
     except (ValueError, TypeError) as error:
