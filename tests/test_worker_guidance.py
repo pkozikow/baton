@@ -57,6 +57,24 @@ class WorkerGuidanceTest(unittest.TestCase):
         self.assertEqual(self.git(coordinator, "rev-parse", "HEAD"), tip)
         self.assertEqual(self.git(coordinator, "status", "--porcelain"), "")
 
+    def test_tier_worker_models_carry_a_reasoning_effort(self) -> None:
+        self.start_project()
+        self.cli("config", "set", "--model-tier", "codex.medium=gpt-6-luna", "--worker-model", "codex=medium",
+                 "--worker-model", "claude=claude-worker")
+        data = self.status()
+        self.assertEqual(data["resolved_worker_effort"], {"codex": "high", "claude": None, "agy": None})
+        self.assertIn("select model gpt-6-luna with reasoning effort high instead",
+                      data["worker_model_guidance"]["codex"])
+        self.assertIn("no reasoning effort selector", data["worker_model_guidance"]["codex"])
+        # A literal model has no tier, so its guidance names no effort.
+        self.assertNotIn("effort", data["worker_model_guidance"]["claude"])
+        self.cli("config", "set", "--model-tier-effort", "codex.medium=xhigh")
+        data = self.status()
+        self.assertEqual(data["resolved_worker_effort"]["codex"], "xhigh")
+        self.assertIn("with reasoning effort xhigh", self.cli("status", "example").stdout)
+        self.assertEqual(data["resolved_worker_effort"],
+                         json.loads(self.cli("config", "show").stdout)["resolved_worker_effort"])
+
     def test_codex_owner_only_sees_codex_guidance(self) -> None:
         self.check_owner_guidance("codex", "gpt-6.1-sol")
 

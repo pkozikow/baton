@@ -38,7 +38,10 @@ Contract for a provider (enforced by tests/test_providers.py):
   (``prompt_delivery`` argv, with the raw input on stdin) or with the combined
   prompt and input on stdin. Providers override ``run_review`` for another protocol,
   ``review_output`` to name the output file, and ``review_options`` to read
-  provider-specific review settings from the environment. Reviewers read untrusted
+  provider-specific review settings from the environment. ``efforts`` lists the
+  reasoning efforts a model tier may carry for the provider (empty when the CLI has
+  no effort control); a review passes the selected tier's effort as
+  ``<effort_flag> EFFORT`` unless the provider delivers it another way. Reviewers read untrusted
   diffs and plans, so every review invocation must be read-only (a read-only
   sandbox, permission mode or tool allow-list) and never use blanket approval or
   sandbox bypass flags. ``read_dir_flag`` passes ``request.read_dirs`` (the
@@ -304,6 +307,12 @@ class ReviewRequest:
         stream.flush()
 
 
+def _reasoning_detail(request: ReviewRequest) -> dict[str, str]:
+    """The attempt-record detail for a reviewer launched with an explicit effort."""
+    effort = request.options.get("reasoning")
+    return {"reasoning": effort} if effort else {}
+
+
 @dataclass(frozen=True)
 class Provider:
     name: str
@@ -322,6 +331,9 @@ class Provider:
     session_id_source: str = ""
     subagent_guidance: str = ""
     read_dir_flag: str | None = None
+    # Reasoning efforts the CLI accepts; empty when it has no effort control (the model ID carries it).
+    efforts: tuple[str, ...] = ()
+    effort_flag: str | None = None
     validates_review: ClassVar[bool] = False
 
     @property
@@ -366,9 +378,16 @@ class Provider:
         if session_id is not None and not self.supports_fork:
             raise UnsupportedProviderOperation(f"{self.name} cannot fork a session; run unattended without one.")
 
-    def review_options(self, prefix: str, environ: Mapping[str, str]) -> dict[str, str]:
-        """Provider-specific review settings from ``<prefix>_*`` variables; raises ValueError naming the variable."""
-        return {}
+    def review_options(self, prefix: str, environ: Mapping[str, str], effort: str | None = None) -> dict[str, str]:
+        """Provider-specific review settings from ``<prefix>_*`` variables; raises ValueError naming the variable.
+
+        ``effort`` is the selected model tier's reasoning effort, or None when the selection is not a tier.
+        """
+        return {"reasoning": effort} if effort else {}
+
+    def effort_args(self, request: ReviewRequest) -> list[str]:
+        effort = request.options.get("reasoning")
+        return [self.effort_flag, effort] if self.effort_flag and effort else []
 
     def review_output(self, prefix: str, model: str) -> Path:
         return Path(f"{prefix}-{self.name}.md")
@@ -416,6 +435,7 @@ class Provider:
         command = [request.executable, *self.args, *session_args]
         if request.model != "default":
             command += [self.model_flag, request.model]
+        command += self.effort_args(request)
         command += self.read_dir_args(request)
         command += self.prompt_separator
         stdin = request.input
@@ -423,7 +443,7 @@ class Provider:
             stdin = request.combined_input
         else:
             command.append(request.prompt)
-        request.begin_attempt(session_id, request.log)
+        request.begin_attempt(session_id, request.log, **_reasoning_detail(request))
         with request.output.open("wb") as output, request.log.open("wb") as log:
             status = run_reviewer_command(command, request, stdin=stdin, stdout=output, stderr=log)
         request.update_attempt(status=status)
@@ -544,10 +564,12 @@ class CodexProvider(Provider):
             command.append(session_id)
         return [*command, "-"], PROMPT_STDIN
 
-    def review_options(self, prefix: str, environ: Mapping[str, str]) -> dict[str, str]:
+    def review_options(self, prefix: str, environ: Mapping[str, str], effort: str | None = None) -> dict[str, str]:
         variable = f"{prefix}_CODEX_REASONING"
-        reasoning = (environ.get(variable) or environ.get("CODEX_REASONING_EFFORT")
-                     or codex_config_reasoning(environ) or "high")
+        # A tier's effort is Baton policy, so only the per-run variable overrides it; the ambient Codex
+        # settings apply to selections that carry no effort.
+        reasoning = (environ.get(variable) or effort or environ.get("CODEX_REASONING_EFFORT")
+                     or codex_config_reasoning(environ) or DEFAULT_TIER_EFFORT)
         if reasoning not in CODEX_REASONING:
             raise ValueError(f"{variable} must be one of: {', '.join(CODEX_REASONING)}")
         fallback = environ.get(f"{prefix}_CODEX_AUTO_FALLBACK") or "1"
@@ -606,7 +628,7 @@ class CodexProvider(Provider):
         reasoning = request.options.get("reasoning", "high")
         candidates = [reasoning]
         if request.options.get("auto_fallback", "1") == "1":
-            candidates += {"high": ["medium", "low"], "medium": ["low"], "minimal": ["low"]}.get(reasoning, [])
+            candidates += CODEX_FALLBACKS.get(reasoning, [])
         model = [] if request.model == "default" else [self.model_flag, request.model]
         stem = str(request.log).removesuffix(".log")
         status, attempt_log = 1, None
@@ -686,7 +708,11 @@ class CodexProvider(Provider):
         return status
 
 
-CODEX_REASONING = ("minimal", "low", "medium", "high")
+CODEX_REASONING = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+CODEX_FALLBACKS = {"max": ["high", "medium", "low"], "xhigh": ["high", "medium", "low"], "high": ["medium", "low"],
+                   "medium": ["low"], "minimal": ["low"]}
+CLI_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+DEFAULT_TIER_EFFORT = "high"
 MCP_LIST_TIMEOUT_SECS = 10
 CODEX_NO_PLUGINS = ("--config", "features.plugins=false")
 CODEX_SESSION = re.compile(r"^session id:\s*(\S+)\s*$", re.MULTILINE)
@@ -841,6 +867,7 @@ class AgyProvider(Provider):
                        "--output-format", "stream-json"]
             if request.model != "default":
                 command += [self.model_flag, request.model]
+            command += self.effort_args(request)
             command += self.read_dir_args(request)
             command.append("--sandbox")
             result: dict[str, Any] | None = None
@@ -876,7 +903,8 @@ class AgyProvider(Provider):
                             progress[key] = usage[key]
                     request.update_attempt(progress=dict(progress))
 
-            request.begin_attempt(None, request.log, temporary_cwd=work, progress=dict(progress))
+            request.begin_attempt(None, request.log, temporary_cwd=work, progress=dict(progress),
+                                  **_reasoning_detail(request))
             with stream_path.open("rb") as events:
                 def observe(*, final: bool = False) -> bool:
                     nonlocal result, encoded, pending, failure
@@ -975,7 +1003,7 @@ class CursorProvider(Provider):
 PROVIDERS: dict[str, Provider] = {
     # No read_dir_flag: the read-only sandbox already reads any path, and codex's --add-dir grants writes.
     "codex": CodexProvider(
-        "codex", "codex", session_env="CODEX_THREAD_ID", supports_fork=True,
+        "codex", "codex", session_env="CODEX_THREAD_ID", supports_fork=True, efforts=CODEX_REASONING,
         skill_dir=".agents/skills", skill_reads=(".agents/skills",),
         session_id_source="CODEX_THREAD_ID in the agent shell holds the current thread ID; claim reads it "
                           "when --session-id is omitted.",
@@ -986,7 +1014,7 @@ PROVIDERS: dict[str, Provider] = {
         # variadic, so the prompt follows the "--" separator.
         "claude", "claude", args=("-p", *CLAUDE_READ_ONLY),
         prompt_separator=("--",), read_dir_flag="--add-dir", session_env="CLAUDE_CODE_SESSION_ID",
-        supports_fork=True,
+        supports_fork=True, efforts=CLI_EFFORTS, effort_flag="--effort",
         read_confinement="enforced", skill_dir=".claude/skills", skill_reads=(".claude/skills",),
         session_id_source="CLAUDE_CODE_SESSION_ID in the agent shell holds the current session ID, including "
                           "inside a forked session; claim reads it when --session-id is omitted.",
@@ -994,6 +1022,7 @@ PROVIDERS: dict[str, Provider] = {
                           "use `fork`, which inherits the parent's conversation."),
     "agy": AgyProvider(
         "agy", "agy", read_confinement="enforced", read_dir_flag="--add-dir",
+        efforts=CLI_EFFORTS, effort_flag="--effort",
         skill_dir=".gemini/antigravity-cli/skills",
         skill_reads=(".gemini/antigravity-cli/skills", ".gemini/config/skills"),
         session_env="ANTIGRAVITY_CONVERSATION_ID",
@@ -1064,20 +1093,50 @@ def validate_review_models(key: str, models: Any) -> None:
             raise ValueError(f"{key}.{provider} must be a nonblank model name without control characters")
 
 
-def validate_model_tiers(tiers: Any) -> None:
+def validate_tier_names(key: str, tiers: Any, values: str = "values") -> None:
+    """Checks the shape, providers and tier names shared by the per-tier maps."""
     if not isinstance(tiers, dict):
-        raise ValueError("model_tiers must map providers to model tier mappings")
+        raise ValueError(f"{key} must map providers to tier mappings")
     for provider, mapping in tiers.items():
         if provider not in PROVIDERS:
-            raise ValueError(f"Unknown provider in model_tiers: {provider}")
+            raise ValueError(f"Unknown provider in {key}: {provider}")
         if not isinstance(mapping, dict):
-            raise ValueError(f"model_tiers.{provider} must map strong, medium, or weak to model names")
-        for tier, model in mapping.items():
+            raise ValueError(f"{key}.{provider} must map strong, medium, or weak to {values}")
+        for tier in mapping:
             if tier not in MODEL_TIERS:
-                raise ValueError(f"Unknown model tier in model_tiers.{provider}: {tier}; expected {', '.join(MODEL_TIERS)}")
+                raise ValueError(f"Unknown model tier in {key}.{provider}: {tier}; expected {', '.join(MODEL_TIERS)}")
+
+
+def validate_model_tiers(tiers: Any) -> None:
+    validate_tier_names("model_tiers", tiers, "model names")
+    for provider, mapping in tiers.items():
+        for tier, model in mapping.items():
             validate_review_models("model_tiers", {provider: model})
             if model in (*MODEL_TIERS, "default"):
                 raise ValueError(f"model_tiers.{provider}.{tier} must name an actual model, not {model}")
+
+
+def validate_model_tier_effort(efforts: Any) -> None:
+    validate_tier_names("model_tier_effort", efforts, "reasoning efforts")
+    for provider, mapping in efforts.items():
+        accepted = PROVIDERS[provider].efforts
+        for tier, effort in mapping.items():
+            if not accepted:
+                raise ValueError(f"{provider} has no reasoning effort setting; choose the effort through the "
+                                 f"model ID in model_tiers.{provider}.{tier}")
+            if effort not in accepted:
+                raise ValueError(f"model_tier_effort.{provider}.{tier} must be one of: {', '.join(accepted)}")
+
+
+def tier_effort(provider: str, selection: str, efforts: Mapping[str, Mapping[str, str]]) -> str | None:
+    """The reasoning effort a model selection carries.
+
+    Only a tier has one (its saved effort, else the default), and only for a provider with an effort control;
+    a literal model ID or ``default`` leaves the effort to the provider CLI.
+    """
+    if selection not in MODEL_TIERS or not PROVIDERS[provider].efforts:
+        return None
+    return efforts.get(provider, {}).get(selection, DEFAULT_TIER_EFFORT)
 
 
 def resolve_review_model(provider: str, model: str, model_tiers: dict[str, dict[str, str]]) -> str:
@@ -1144,3 +1203,10 @@ def effective_worker_models(config: dict[str, Any]) -> dict[str, str]:
 
 def resolved_worker_models(config: dict[str, Any]) -> dict[str, str]:
     return resolved_models(config, "worker_model")
+
+
+def resolved_worker_efforts(config: dict[str, Any]) -> dict[str, str | None]:
+    efforts = config.get("model_tier_effort", {})
+    validate_model_tier_effort(efforts)
+    return {provider: tier_effort(provider, model, efforts)
+            for provider, model in effective_worker_models(config).items()}

@@ -9,7 +9,8 @@ import unittest
 from baton.review_loop import effective_review_loop
 from baton.providers import (MODEL_OPTIONS, REVIEW_MODEL_OPTIONS, PROVIDERS, Provider,
                              MODEL_TIERS, default_review_models, effective_review_models, provider_settings,
-                             resolve_review_model, resolved_review_models, effective_worker_models, resolved_worker_models)
+                             resolve_review_model, resolved_review_models, effective_worker_models, resolved_worker_models,
+                             tier_effort, validate_model_tier_effort)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -51,6 +52,8 @@ class ReviewConfigurationTest(unittest.TestCase):
         for name, entry in data["providers"].items():
             self.assertEqual(entry["guidance"], PROVIDERS[name].guidance())
         self.assertEqual(data["model_tiers"], {})
+        self.assertEqual(data["model_tier_effort"], {})
+        self.assertEqual(data["resolved_worker_effort"], {"codex": None, "claude": None, "agy": None})
         for key in MODEL_OPTIONS:
             self.assertEqual(data["resolved_" + key], data[key])
         self.assertEqual(data["review_loop"], effective_review_loop({}))
@@ -365,6 +368,83 @@ class ReviewConfigurationTest(unittest.TestCase):
         self.assertIn("plan_review_model.codex", failed.stderr)
         self.assertEqual(self.config.read_bytes(), original)
 
+    def test_tier_efforts_default_to_high_and_follow_saved_values(self) -> None:
+        self.cli("set", "--model-tier", "codex.strong=a", "--model-tier", "claude.medium=b",
+                 "--model-tier", "cursor.strong=c", "--worker-model", "codex=strong",
+                 "--worker-model", "claude=medium", "--worker-model", "cursor=strong",
+                 "--worker-model", "agy=literal-model")
+        data = json.loads(self.cli("show").stdout)
+        self.assertEqual(data["model_tier_effort"], {})
+        # Only a tier carries an effort, and only where the CLI has an effort control.
+        self.assertEqual(data["resolved_worker_effort"],
+                         {"codex": "high", "claude": "high", "agy": None, "cursor": None})
+        # An effort may be saved alone, also for a tier that has no model yet.
+        data = json.loads(self.cli("set", "--model-tier-effort", "codex.strong=xhigh",
+                                   "--model-tier-effort", "claude.weak=low").stdout)
+        self.assertEqual(data["model_tier_effort"], {"codex": {"strong": "xhigh"}, "claude": {"weak": "low"}})
+        self.assertEqual(data["resolved_worker_effort"],
+                         {"codex": "xhigh", "claude": "high", "agy": None, "cursor": None})
+        self.assertEqual(data["model_tiers"]["codex"], {"strong": "a"})
+        self.assertEqual(data["resolved_worker_model"]["codex"], "a")
+
+    def test_worker_effort_section_ignores_the_review_loop(self) -> None:
+        self.save({"review_loop": "malformed", "worker_model": {"codex": "weak", "claude": "direct"},
+                   "model_tiers": {"codex": {"weak": "small"}}, "model_tier_effort": {"codex": {"weak": "low"}}})
+        data = json.loads(self.cli("show", "--section", "resolved_worker_model",
+                                   "--section", "resolved_worker_effort").stdout)
+        self.assertEqual(data, {"resolved_worker_model": {"codex": "small", "claude": "direct", "agy": "default"},
+                                "resolved_worker_effort": {"codex": "low", "claude": None, "agy": None}})
+
+    def test_tier_efforts_are_removed_independently_of_tier_models(self) -> None:
+        self.cli("set", "--model-tier", "codex.strong=a", "--model-tier-effort", "codex.strong=max",
+                 "--model-tier-effort", "codex.weak=none", "--model-tier-effort", "agy.medium=medium",
+                 "--model-tier-effort", "claude.strong=xhigh")
+        self.cli("set", "--remove-model-tier", "codex.strong")
+        saved = json.loads(self.config.read_text())
+        self.assertEqual(saved["model_tiers"], {})
+        self.assertEqual(saved["model_tier_effort"]["codex"], {"strong": "max", "weak": "none"})
+        self.cli("set", "--remove-model-tier-effort", "codex.weak", "--remove-model-tier-effort", "agy",
+                 "--remove-model-tier-effort", "cursor", "--model-tier-effort", "claude.strong=low")
+        self.assertEqual(json.loads(self.config.read_text())["model_tier_effort"],
+                         {"codex": {"strong": "max"}, "claude": {"strong": "low"}})
+
+    def test_invalid_tier_effort_assignments_never_write(self) -> None:
+        self.cli("set", "--repo-alias", "api=backend")
+        original = self.config.read_bytes()
+        invalid = ("codex.strong", "codex=high", ".strong=high", "unknown.strong=high", "codex.other=high",
+                   "codex.strong=", "codex.strong=extreme", "claude.strong=minimal", "agy.weak=none",
+                   "cursor.strong=high")
+        for assignment in invalid:
+            with self.subTest(assignment=assignment):
+                failed = self.cli("set", "--model-tier-effort", assignment, "--repo-alias", "web=frontend", ok=False)
+                self.assertNotIn("Traceback", failed.stderr)
+                self.assertEqual(self.config.read_bytes(), original)
+        self.assertIn("cursor has no reasoning effort setting", failed.stderr)
+        for args in (("--model-tier-effort", "codex.strong=low", "--remove-model-tier-effort", "codex"),
+                     ("--model-tier-effort", "codex.strong=low", "--remove-model-tier-effort", "codex.strong"),
+                     ("--remove-model-tier-effort", "codex."), ("--remove-model-tier-effort", "unknown"),
+                     ("--remove-model-tier-effort", "codex.other"),
+                     ("--selector", "p1", "--model-tier-effort", "codex.strong=low"),
+                     ("--selector", "p1", "--remove-model-tier-effort", "codex")):
+            with self.subTest(args=args):
+                failed = self.cli("set", *args, ok=False)
+                self.assertNotIn("Traceback", failed.stderr)
+                self.assertEqual(self.config.read_bytes(), original)
+
+    def test_invalid_saved_tier_efforts_fail_closed_without_writes(self) -> None:
+        invalid = ([], None, "high", {"unknown": {}}, {"codex": []}, {"codex": {"other": "high"}},
+                   {"claude": {"strong": "minimal"}}, {"cursor": {"strong": "high"}}, {"codex": {"strong": 3}})
+        for efforts in invalid:
+            with self.subTest(efforts=efforts):
+                self.save({"model_tier_effort": efforts})
+                original = self.config.read_bytes()
+                for args in (("show",), ("init",), ("show", "--section", "resolved_worker_effort"),
+                             ("set", "--repo-alias", "api=backend")):
+                    failed = self.cli(*args, ok=False)
+                    self.assertIn("effort", failed.stderr)
+                    self.assertNotIn("Traceback", failed.stderr)
+                self.assertEqual(self.config.read_bytes(), original)
+
     def test_registry_extension_supplies_defaults_validation_and_runner_metadata(self) -> None:
         provider = Provider("future", "future-cli", args=("--print",))
         PROVIDERS[provider.name] = provider
@@ -378,6 +458,10 @@ class ReviewConfigurationTest(unittest.TestCase):
                              "future-medium-model")
             self.assertEqual(provider_settings()[provider.name]["binary"], "future-cli")
             self.assertEqual(provider_settings()[provider.name]["review"]["args"], ["--print"])
+            # Without declared efforts a provider takes none, whatever its name.
+            self.assertIsNone(tier_effort("future", "medium", {}))
+            with self.assertRaisesRegex(ValueError, "future has no reasoning effort setting"):
+                validate_model_tier_effort({"future": {"medium": "high"}})
         finally:
             del PROVIDERS[provider.name]
 

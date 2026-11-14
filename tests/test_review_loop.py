@@ -4,7 +4,7 @@ import subprocess
 import unittest
 
 from baton.review_loop import (DEFAULT_FOCUSED_REVIEWS, DEFAULT_GENERAL_ROUNDS, effective_review_loop,
-                               review_focus_catalog, resolved_focused_review_models)
+                               focused_review_selections, review_focus_catalog, resolved_focused_review_models)
 import test_review_configuration as fixtures
 
 
@@ -136,6 +136,9 @@ class FocusedModelTest(unittest.TestCase):
         self.assertEqual(models["performance"]["codex"], "normal")
         self.assertEqual(config["implementation_review_model"], {"codex": "normal"})
         self.assertEqual(resolved_focused_review_models(config)["security"]["codex"], "large")
+        # The unresolved selection decides the effort: the project's ``default`` replaces the global tier.
+        self.assertEqual(focused_review_selections(config)["security"]["codex"], "strong")
+        self.assertEqual(focused_review_selections(config, project)["security"]["codex"], "default")
         self.assertTrue(all(text.strip() for text in review_focus_catalog().values()))
 
     def test_invalid_global_cannot_be_hidden_by_project(self) -> None:

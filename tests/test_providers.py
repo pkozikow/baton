@@ -7,7 +7,8 @@ import unittest
 from unittest.mock import patch
 
 from baton.errors import ProjectError
-from baton.providers import (PROMPT_ARGV, PROMPT_STDIN, PROVIDERS, UnsupportedProviderOperation, get_provider,
+from baton.providers import (DEFAULT_TIER_EFFORT, PROMPT_ARGV, PROMPT_STDIN, PROVIDERS, UnsupportedProviderOperation,
+                             get_provider,
                              provider_guidance, scrubbed_environment, session_variables)
 from baton.skills_install import FLOOR, default_targets, discovery_conflicts, unmanaged_copies
 
@@ -51,6 +52,9 @@ class ProviderContractTest(unittest.TestCase):
                     with self.assertRaises(UnsupportedProviderOperation):
                         entry.fork(SESSION, DIRECTORY, PROMPT)
                 self.assertIn(entry.read_confinement, ("enforced", "best_effort"))
+                # A tier without a saved effort resolves to the default, so every effort control must accept it.
+                self.assertTrue(not entry.efforts or DEFAULT_TIER_EFFORT in entry.efforts)
+                self.assertTrue(entry.effort_flag is None or entry.efforts)
                 guidance = entry.guidance()
                 self.assertEqual(set(guidance), {"claim_command", "session_id_source", "fresh_subagent"})
                 self.assertTrue(all(guidance.values()), guidance)

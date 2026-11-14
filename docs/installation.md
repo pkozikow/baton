@@ -176,7 +176,11 @@ repositories. Coordinator slots are `p1` through `p10`.
 **Model checks.** Validate selections and required tier mappings, then invoke each
 distinct configured provider/model through the same provider review code used by
 `baton review run`, requiring a zero exit status.
-Configured tier targets are checked even when not currently selected. Literal model
+Configured tier targets are checked even when not currently selected, each at its
+tier's [reasoning effort](configuration.md#tier-reasoning-effort) and without
+Codex's lower-reasoning fallback, so an effort the provider CLI rejects for that
+model fails the check. Tiers that share a model at different efforts are checked
+separately. Literal model
 IDs are verified by the provider CLI accepting them and answering a small nonce prompt;
 `default` leaves model selection to the provider CLI. Cursor remains opt-in; its
 headless reviews and smoke tests accept workspace trust with `--trust` while

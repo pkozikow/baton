@@ -69,12 +69,18 @@ def effective_review_loop(config: dict[str, Any], project: dict[str, Any] | None
     return merged
 
 
-def resolved_focused_review_models(config: dict[str, Any], project: dict[str, Any] | None = None) -> dict[str, dict[str, str]]:
+def focused_review_selections(config: dict[str, Any], project: dict[str, Any] | None = None) -> dict[str, dict[str, str]]:
+    """Each focus area's unresolved model selection per provider: a tier, a model ID or ``default``."""
     settings = effective_review_loop(config, project)
     normal = effective_models(config, "implementation_review_model")
-    return {area: {provider: resolve_review_model(provider,
-                settings["focused_review_models"].get(area, {}).get(provider, normal.get(provider, "default")),
-                config.get("model_tiers", {})) for provider in PROVIDERS} for area in review_focus_catalog()}
+    return {area: {provider: settings["focused_review_models"].get(area, {}).get(provider, normal.get(provider, "default"))
+                   for provider in PROVIDERS} for area in review_focus_catalog()}
+
+
+def resolved_focused_review_models(config: dict[str, Any], project: dict[str, Any] | None = None) -> dict[str, dict[str, str]]:
+    return {area: {provider: resolve_review_model(provider, model, config.get("model_tiers", {}))
+                   for provider, model in selections.items()}
+            for area, selections in focused_review_selections(config, project).items()}
 
 
 def review_project(selector: str | None = None) -> dict[str, Any] | None:

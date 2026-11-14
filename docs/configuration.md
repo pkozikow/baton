@@ -125,7 +125,9 @@ provider-to-model map. `"default"` omits the model flag and lets the provider
 CLI choose. Direct model IDs are passed explicitly. The reserved values `strong`,
 `medium`, and `weak` resolve through that provider's `model_tiers` mapping; an
 unmapped tier fails before any review starts. Mappings are shared by the plan and
-implementation workflows, while their model selections stay independent.
+implementation workflows, while their model selections stay independent. A tier
+also carries a [reasoning effort](#tier-reasoning-effort), which the reviewer CLI
+receives with the model.
 
 Model settings in environment variables do not override this policy.
 `PLAN_REVIEW_REVIEWERS` and `PEER_REVIEW_REVIEWERS` select registered providers
@@ -135,7 +137,9 @@ model use their CLI default. Reviewers run in registry order.
 `PLAN_REVIEW_TIMEOUT_SECS` / `PEER_REVIEW_TIMEOUT_SECS` override the timeout for
 every reviewer, and `PLAN_REVIEW_<PROVIDER>_TIMEOUT_SECS` /
 `PEER_REVIEW_<PROVIDER>_TIMEOUT_SECS` override it for one provider; `--reviewers
-CSV` on `baton review run` overrides the reviewer set like the variables. `baton
+CSV` on `baton review run` overrides the reviewer set like the variables.
+`PLAN_REVIEW_CODEX_REASONING` / `PEER_REVIEW_CODEX_REASONING` set Codex's reasoning
+effort for one run, overriding a tier's effort. `baton
 review run --help` lists Codex reasoning controls and other invocation options; see
 [Review runs](skills.md#review-runs). Reviewer safety is described in
 [Review boundaries](skills.md#review-boundaries).
@@ -177,7 +181,9 @@ Precedence:
 - **Focused models**, per focus/provider pair: project pair, then global pair,
   then the provider's normal `implementation_review_model`. Overrides never enable
   reviewers or change plan or general review models. Literal model IDs, mapped
-  tiers and `default` have their normal meanings.
+  tiers and `default` have their normal meanings, including the effort: an
+  override that names a tier uses that tier's effort, and a literal model or
+  `default` carries none.
 
 ```sh
 baton config set --review-focus performance --review-focus security \
@@ -227,9 +233,9 @@ invalid settings still fail. Ordinary configuration loading, status, blackboard/
 plan/general reviews ignore the review-loop subtree. Narrow read-only metadata
 queries, `baton config show --section paths` and
 `baton config show --section branch_prefix` (repeatable), validate only requested
-fields and do not load the catalog. The `providers`, `worker_model`, and
-`resolved_worker_model` sections support worker discovery without resolving the
-review loop. Installation uses
+fields and do not load the catalog. The `providers`, `worker_model`,
+`resolved_worker_model` and `resolved_worker_effort` sections support worker
+discovery without resolving the review loop. Installation uses
 `config init --preserve-review-loop` to preserve existing settings without
 validating this subtree; ordinary initialization stays strict.
 
@@ -251,6 +257,47 @@ does not select a review model or enable an opt-in provider. `baton config show`
 includes the configured choices and the effective `resolved_plan_review_model` and
 `resolved_implementation_review_model` maps used by the runners.
 
+### Tier reasoning effort
+
+Each tier also carries a reasoning effort, which defaults to `high`:
+
+```sh
+baton config set --model-tier-effort codex.strong=xhigh \
+  --model-tier-effort claude.weak=medium
+baton config set --remove-model-tier-effort codex.strong   # back to high
+baton config set --remove-model-tier-effort claude         # all of claude's tiers
+```
+
+The command above stores
+`"model_tier_effort": {"codex": {"strong": "xhigh"}, "claude": {"weak": "medium"}}`.
+Whenever a selection names a tier (a review model, a focused review model or a
+worker model), the tier's effort goes with its model. A literal model ID or
+`default` carries no effort and leaves it to the provider CLI.
+
+| Provider | Efforts | Passed to reviews as |
+| --- | --- | --- |
+| codex | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | `--config model_reasoning_effort="EFFORT"` |
+| claude | `low`, `medium`, `high`, `xhigh`, `max` | `--effort EFFORT` |
+| agy | `low`, `medium`, `high`, `xhigh`, `max` | `--effort EFFORT` |
+| cursor | none | nothing: choose the effort in the model ID, such as `MODEL[effort=high]` |
+
+- An effort is validated against its provider's list when it is set and whenever
+  the configuration is loaded. Providers without an effort control reject the
+  setting. Whether a particular model accepts a particular effort is decided by
+  the provider; `baton doctor` runs every tier target at its effort.
+- The effort and the model are independent settings of a tier: an effort can be
+  saved before the tier has a model, and `--remove-model-tier` keeps it.
+- For Codex reviews the order is `<PREFIX>_CODEX_REASONING`, then the tier's
+  effort; a selection without a tier falls back to `CODEX_REASONING_EFFORT`,
+  Codex's `config.toml`, then `high`. A tier therefore never inherits the ambient
+  Codex setting.
+- agy model IDs may end in an effort, such as `MODEL-high`. agy rejects such an ID
+  together with a different `--effort`, so save the matching effort for the tier
+  (`high` already is the default) or map the tier to the ID without the suffix.
+
+The effort a review actually ran with, after overrides and Codex fallbacks, is in
+its run record (`baton review show RUN`).
+
 ## Worker models
 
 Worker model preferences are separate delegation guidance for the project owner:
@@ -267,7 +314,9 @@ choices. `default` means no guidance; the framework does not add a model choice 
 worker dispatch.
 
 `baton status --json` exposes the configured `worker_model` and concrete
-`resolved_worker_model` maps, matching `baton config show`. A non-default value also
+`resolved_worker_model` maps, matching `baton config show`. `resolved_worker_effort`
+gives each provider's [tier effort](#tier-reasoning-effort), or `null` when the
+worker model is not a tier or the provider has no effort control. A non-default value also
 appears as actionable `worker_model_guidance` and in plain status output. Both
 forms show guidance only for the recorded owner's provider; unclaimed projects
 show all configured guidance until ownership is recorded. This follows project
@@ -279,7 +328,9 @@ by the skills; there is no separate worker-model prompt injected at session star
 The planning and peer-review skills apply a model preference only when the worker's
 provider has an entry in `worker_model_guidance`. They take its concrete model ID
 from `resolved_worker_model` and pass it explicitly when launching workers,
-even when the owner runs a different model. These settings are read at invocation
+even when the owner runs a different model. A non-null `resolved_worker_effort`
+goes through the runtime's effort selector the same way; a runtime without one
+dispatches with the model alone and reports that. These settings are read at invocation
 time, so existing projects see updates without rewriting their manifests.
 
 The preference does not change ownership, select the owner model, enable a review
