@@ -135,8 +135,8 @@ class DoctorSmokeTests(unittest.TestCase):
                   'model_tiers': {'codex': {'strong': 'astra', 'medium': 'astra', 'weak': 'astra'},
                                   'claude': {'strong': 'opus'}, 'agy': {'weak': 'gemini'}},
                   'model_tier_effort': {'codex': {'medium': 'xhigh'}, 'claude': {'strong': 'max'}}}
-        # Neither the fallback switch nor the per-run override may hide a rejected tier effort.
-        os.environ.update(PEER_REVIEW_CODEX_AUTO_FALLBACK='1', PEER_REVIEW_CODEX_REASONING='low',
+        # Per-run review settings, even invalid ones, neither replace a tier's effort nor hide its rejection.
+        os.environ.update(PEER_REVIEW_CODEX_AUTO_FALLBACK='2', PEER_REVIEW_CODEX_REASONING='bogus',
                           DOCTOR_BEHAVIOR='reject_xhigh')
         checks = model_checks(config)
 

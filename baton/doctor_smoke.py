@@ -45,14 +45,16 @@ def _run_smoke_case(case: SmokeCase, timeout: int, processes: ProcessGroups) -> 
         return {"name": name, "status": "fail", "message": f"CLI not found: {binary}"}
     # Absolute but not resolved: a symlinked CLI may depend on the name it is invoked by.
     executable = str(Path(executable).absolute())
+    # A tier case checks whether the model accepts the tier's own effort, so neither a per-run review
+    # setting nor a lower fallback may stand in for it.
+    environ = os.environ if effort is None else {
+        key: value for key, value in os.environ.items() if not key.startswith(SMOKE_ENV_PREFIX + "_")}
     try:
-        options = entry.review_options(SMOKE_ENV_PREFIX, os.environ, effort)
+        options = entry.review_options(SMOKE_ENV_PREFIX, environ, effort)
     except ValueError as error:
         return {"name": name, "status": "fail", "message": f"{provider} smoke test cannot run: {error}"}
     if effort is not None:
-        # The check is whether the model accepts the tier's own effort, so neither the per-run override
-        # nor a lower fallback may stand in for it.
-        options = {**options, "reasoning": effort, "auto_fallback": "0"}
+        options = {**options, "auto_fallback": "0"}
     at_effort = f" at reasoning effort {effort}" if effort is not None else ""
     nonce = "BATON_DOCTOR_" + secrets.token_hex(12)
     prompt = ("This is a CLI connectivity smoke test. Do not use tools, read other files, or modify files. "

@@ -543,7 +543,8 @@ class ProjectManagerTest(unittest.TestCase):
         data = self.status_json(cwd=self.checkout("Beta"))
         self.assertEqual(set(data), {"name", "slot", "coordinator", "branch", "state", "blackboard", "uuid", "owner",
                                  "master_path", "helper_path", "note_directories", "pending_operation", "current_entry", "entries", "retired_entries", "errors",
-                                 "worker_model", "resolved_worker_model", "worker_model_guidance", "provider_guidance"})
+                                 "worker_model", "resolved_worker_model", "resolved_worker_effort", "worker_model_guidance",
+                                     "provider_guidance"})
         self.assertIsNone(data["owner"])
         self.assertRegex(data["uuid"], r"^[0-9a-f]{32}$")
         self.assertEqual(data["retired_entries"], [])
