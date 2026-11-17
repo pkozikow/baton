@@ -110,6 +110,7 @@ def build_parser() -> argparse.ArgumentParser:
     path.add_argument("repo", nargs="?")
     path.add_argument("--selector", dest="explicit_selector", metavar="PROJECT", help=selector_help)
     path.add_argument("--member", help="Registered member (first checkout is the default)")
+    path.add_argument("--artifacts", action="store_true", help="Print the project's artifact directory")
     stack = commands.add_parser("stack", help="Inspect native stack groups")
     stack_commands = stack.add_subparsers(dest="stack_action", required=True)
     stack_status = stack_commands.add_parser("status")
@@ -291,6 +292,8 @@ def main() -> int:
         if args.repo is not None:
             parser.error("path --selector accepts at most one positional repository")
         args.repo, args.selector = args.selector, args.explicit_selector
+    if args.command == "path" and args.artifacts and (args.repo is not None or args.member is not None):
+        parser.error("path --artifacts cannot be combined with a repository or --member")
     if getattr(args, "selector", None) is not None and not args.selector.strip():
         parser.error("Project selector must not be empty")
     manager = None
@@ -461,6 +464,9 @@ def main() -> int:
                     project = manager.state["projects"].get(slot)
                     print(f"{slot}: " + (f"{project['name']} [{project['state']}] " + ", ".join(r["id"] for r in project["repos"]) if project else "idle"))
             elif args.command == "path":
+                if args.artifacts:
+                    print(manager.artifact_directory(manager.artifact_project(args.selector)))
+                    return 0
                 try:
                     project = manager.project(args.selector)
                     repo_id = args.repo

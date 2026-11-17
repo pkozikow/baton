@@ -71,6 +71,85 @@ class ProjectSelectorsTest(unittest.TestCase):
         self.assertEqual(self.cli("path", "alpha", "--selector", "first", "--member", "initial").stdout.strip(), expected)
         self.assertEqual(self.cli("path", "first", "alpha", "--selector", "first", ok=False).returncode, 2)
 
+    def test_artifacts_path_uses_current_or_selected_project_without_writes(self) -> None:
+        first, second = self.two_projects()
+        before = fixtures.read_state(self.projects)
+        self.env.pop("BATON_ALLOW_UNTRUSTED_WRITES", None)
+        for project, repo in ((first, "alpha"), (second, "beta")):
+            for cwd in (self.slots / project["slot"], self.checkout(repo, project["name"])):
+                with self.subTest(cwd=cwd):
+                    self.assertEqual(self.cli("path", "--artifacts", cwd=cwd).stdout,
+                                     project["artifacts_path"] + "\n")
+        for selector in (first["name"], first["slot"], first["uuid"]):
+            for cwd in (self.root, self.slots / "p4"):
+                for arguments in (("--selector", selector, "--artifacts"),
+                                  (selector, "--artifacts"), ("--artifacts", selector)):
+                    with self.subTest(cwd=cwd, arguments=arguments):
+                        self.assertEqual(self.cli("path", *arguments, cwd=cwd).stdout,
+                                         first["artifacts_path"] + "\n")
+        self.assertEqual(fixtures.read_state(self.projects), before)
+
+    def test_artifacts_path_stays_stable_after_rename_and_cleanup(self) -> None:
+        first, _ = self.two_projects()
+        self.cli("rename", "renamed", "--selector", first["uuid"])
+        for selector in ("first", "renamed", "p3", first["uuid"]):
+            with self.subTest(selector=selector, archived=False):
+                self.assertEqual(self.cli("path", "--artifacts", "--selector", selector).stdout,
+                                 first["artifacts_path"] + "\n")
+        self.cli("cleanup", "--selector", first["uuid"])
+        self.env.pop("BATON_ALLOW_UNTRUSTED_WRITES", None)
+        for selector in ("first", "renamed", first["uuid"]):
+            for arguments in ((selector,), ("--selector", selector)):
+                with self.subTest(arguments=arguments, archived=True):
+                    self.assertEqual(self.cli("path", "--artifacts", *arguments).stdout,
+                                     first["artifacts_path"] + "\n")
+        failed = self.cli("path", "--artifacts", "--selector", "p3", ok=False)
+        self.assertEqual(failed.stdout, "")
+        self.assertIn("No active project", failed.stderr)
+
+    def test_artifacts_path_preserves_identity_when_archived_names_are_reused(self) -> None:
+        self.make_repo("alpha")
+        self.create("alpha")
+        first = fixtures.read_state(self.projects)["projects"]["p3"]
+        self.cli("cleanup", "p3")
+        self.create("alpha")
+        second = fixtures.read_state(self.projects)["projects"]["p3"]
+        self.assertNotEqual(first["artifacts_path"], second["artifacts_path"])
+        self.assertEqual(self.cli("path", "example", "--artifacts").stdout,
+                         second["artifacts_path"] + "\n")
+        self.assertEqual(self.cli("path", first["uuid"], "--artifacts").stdout,
+                         first["artifacts_path"] + "\n")
+        self.cli("cleanup", "p3")
+        for arguments in (("example",), ("--selector", "example")):
+            with self.subTest(arguments=arguments):
+                failed = self.cli("path", "--artifacts", *arguments, ok=False)
+                self.assertEqual(failed.stdout, "")
+                self.assertIn("full project UUID", failed.stderr)
+        for project in (first, second):
+            self.assertEqual(self.cli("path", "--selector", project["uuid"], "--artifacts").stdout,
+                             project["artifacts_path"] + "\n")
+
+    def test_artifacts_path_rejects_repositories_members_and_unknown_projects(self) -> None:
+        self.make_repo("alpha")
+        self.create("alpha")
+        before = fixtures.state_file(self.projects).read_bytes()
+        for arguments in (("example", "alpha"), ("--selector", "example", "alpha"),
+                          ("example", "--selector", "example"), ("--member", "initial"),
+                          ("--member", ""), ("--selector", ""), ("--selector", "   ")):
+            with self.subTest(arguments=arguments):
+                failed = self.cli("path", "--artifacts", *arguments, cwd=self.slots / "p3", ok=False)
+                self.assertEqual(failed.returncode, 2)
+                self.assertEqual(failed.stdout, "")
+        for selector in ("alpha", "missing-project"):
+            for arguments in ((selector,), ("--selector", selector)):
+                with self.subTest(arguments=arguments):
+                    failed = self.cli("path", "--artifacts", *arguments, cwd=self.slots / "p3", ok=False)
+                    self.assertEqual(failed.stdout, "")
+                    self.assertIn("No project found", failed.stderr)
+        failed = self.cli("path", "--artifacts", ok=False)
+        self.assertIn("No active project", failed.stderr)
+        self.assertEqual(fixtures.state_file(self.projects).read_bytes(), before)
+
     def test_add_and_rename_target_selected_project_instead_of_cwd(self) -> None:
         first, _ = self.two_projects()
         self.make_repo("gamma")
