@@ -194,6 +194,13 @@ def readable(text: str) -> str:
 
 
 def read_structure(document: dict[str, Any]) -> Structure:
+    try:
+        return _read_structure(document)
+    except (KeyError, TypeError, AttributeError) as error:
+        raise ProjectError(f"The Doc's structure has an unexpected shape ({type(error).__name__}: {error}).") from error
+
+
+def _read_structure(document: dict[str, Any]) -> Structure:
     tabs = document.get("tabs") or []
     if len(tabs) != 1 or tabs[0].get("childTabs"):
         raise ProjectError("The Doc has several tabs; baton gdoc supports only single-tab Docs.")
@@ -440,16 +447,16 @@ def gws(command: str, params: dict[str, Any], body: dict[str, Any] | None = None
     if not result.stdout.strip():
         return {}
     try:
-        return json.loads(result.stdout)
+        response = json.loads(result.stdout)
     except ValueError as error:
         raise ProjectError(f"gws {command} printed output that is not JSON: {result.stdout[:200]}") from error
+    if not isinstance(response, dict):
+        raise ProjectError(f"gws {command} printed an unexpected response: {result.stdout[:200]}")
+    return response
 
 
 def get_document(document_id: str) -> dict[str, Any]:
-    document = gws("docs documents get", {"documentId": document_id, "includeTabsContent": True})
-    if not isinstance(document, dict):
-        raise ProjectError("gws docs documents get returned an unexpected response.")
-    return document
+    return gws("docs documents get", {"documentId": document_id, "includeTabsContent": True})
 
 
 def revision(document_id: str) -> str:
