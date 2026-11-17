@@ -19,6 +19,18 @@ from .providers import effective_worker_models, provider_guidance, resolved_work
 from .skills_install import bundled_skills
 
 
+def gdoc_links(directory: Path) -> list[dict[str, str]]:
+    """Linked Google Docs, read directly so status never imports the optional gdoc module."""
+    try:
+        links = json.loads((directory / "gdoc-links.json").read_text())["links"]
+        if not all(isinstance(link["path"], str) and isinstance(link["document_id"], str) for link in links):
+            return []
+        return [{"path": str(directory / link["path"]), "url": f"https://docs.google.com/document/d/{link['document_id']}/edit"}
+                for link in links]
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+
+
 class StatusMixin(ManagerCore):
     @staticmethod
     def helper_path() -> str:
@@ -182,6 +194,7 @@ class StatusMixin(ManagerCore):
             "blackboard": {"path": str(Path(info["directory"]) / "blackboard.sqlite"), "backend": "sqlite", "generation": info["generation"]} if info else None,
             "pending_operation": {"operation": project["state"], "command": resume} if resume else None,
             "current_entry": max(here, key=lambda e: len(e["path"])) if here else None,
+            "gdoc_links": gdoc_links(directory),
             "entries": result, "retired_entries": retired, "errors": errors,
         }
 

@@ -54,6 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("skills", help="Install or update bundled agent skills")
     commands.add_parser("doctor", help="Check installation freshness, paths, and configured review models")
     commands.add_parser("review", help="Run plan or implementation reviewers (used by the review skills)")
+    commands.add_parser("gdoc", help="Link Markdown artifacts to Google Docs; pull Docs into Git and push diagrams")
     commands.add_parser("init")
     commands.add_parser("list")
     search = commands.add_parser("search", help="Find current and past projects from metadata and saved artifacts")
@@ -275,6 +276,9 @@ def main() -> int:
     if sys.argv[1:2] == ["review"]:
         from .review_runner import main as review_main
         return review_main(sys.argv[2:])
+    if sys.argv[1:2] == ["gdoc"]:
+        from .gdoc import main as gdoc_main
+        return gdoc_main(sys.argv[2:])
     if sys.argv[1:3] == ["retro", "pending"]:
         from .retro_automation import pending_main
         return pending_main(sys.argv[3:])
