@@ -648,6 +648,10 @@ class Gdoc:
             self.save(path, original, with_header(document_id, "".join(lines)), add(document_id),
                       f"Link {name} to a new Google Doc")
         except ProjectError as error:
+            if any(link["document_id"] == document_id for link in self.read_links()):
+                raise ProjectError(f"{error}\nThe link to {doc_url(document_id)} is written but not committed; commit "
+                                   f"{path} and {self.links_path} with baton artifacts commit, then run "
+                                   f"baton gdoc push {path}") from error
             raise ProjectError(f"{error}\nThe Doc was created but not linked; adopt it with: "
                                f"baton gdoc link {path} {doc_url(document_id)}") from error
         print(f"Linked {name} to {doc_url(document_id)}", flush=True)
@@ -793,6 +797,9 @@ class Gdoc:
                 targets.append(Target(block, image.index, image.index + 1))
         if problems:
             raise refusal(problems, structure.images, named)
+        if not targets:
+            print(f"{name}: no pending or changed diagrams to push.")
+            return
         for target in targets:
             print(f"{name}: {'would render' if dry_run else 'rendering'} the block at {target.block.describe()}",
                   flush=True)
