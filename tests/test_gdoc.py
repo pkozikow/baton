@@ -190,6 +190,18 @@ class TransformTest(unittest.TestCase):
                            document("Text."))
         self.assertEqual(new, doc_id_in("Text.\n"))
 
+    def test_mermaid_fences_inside_containers_refuse(self) -> None:
+        for current in ("> ```mermaid\n> x\n> ```\n", "- item\n\n    ```mermaid\n    x\n    ```\n",
+                        "1. ```mermaid\n   x\n   ```\n"):
+            with self.subTest(current=current):
+                with self.assertRaisesRegex(ProjectError, "only at the top level"):
+                    self.pull(current, "Text.\n", document("Text."))
+                with self.assertRaisesRegex(ProjectError, "only at the top level"):
+                    adopt_text(current, read_structure(document("Text.")), DOC)
+        # A quoted fence inside a code block is code, not a diagram.
+        new, _ = self.pull("```text\n> ```mermaid\n```\n", "Text.\n", document("Text."))
+        self.assertEqual(new, doc_id_in("Text.\n"))
+
     def test_unmarked_block_and_duplicate_marks_refuse(self) -> None:
         for current, expected in ((block(FIRST), "Unmarked Mermaid block at line 1"),
                                   (block(FIRST, "image=kix.a") + block(SECOND, "image=kix.a"), "image=kix.a"),
@@ -389,6 +401,20 @@ class GdocCommandTest(unittest.TestCase):
         result = self.gdoc("pull", str(path), ok=False)
         self.assertIn("uncommitted changes", result.stderr)
         self.assertTrue(path.read_text().endswith("local edit\n"))
+
+    def test_pull_and_push_refuse_a_staged_change_hidden_by_a_clean_working_file(self) -> None:
+        path, doc = self.three_diagrams()
+        committed = path.read_text()
+        path.write_text(committed + "staged edit\n")
+        self.git(self.artifacts, "add", str(path))
+        path.write_text(committed)
+        self.serve(doc, "# Spec\n\n![][image1]\n\n![][image2]\n\nBaton-gdoc-diagram-new\n")
+        self.assertIn("staged changes", self.gdoc("pull", str(path), ok=False).stderr)
+        self.serve_push(doc)
+        self.assertIn("uncommitted changes", self.gdoc("push", str(path), ok=False).stderr)
+        self.assertEqual(self.git(self.artifacts, "show", f":{path.relative_to(self.artifacts)}"),
+                         (committed + "staged edit").rstrip("\n"))
+        self.assertFalse(self.calls("docs documents batchUpdate"))
 
     def test_pull_refuses_when_markdown_changes_during_the_export(self) -> None:
         path = self.linked("spec.md", "old\n")
@@ -673,6 +699,15 @@ class GdocCommandTest(unittest.TestCase):
         self.assertEqual(path.read_text(), header(DOC) + "\n\n# Design\n\nText.\n"
                          + block(FIRST, image_mark("kix.made", FIRST)) + "More.\n")
         self.assertEqual(self.git(self.artifacts, "status", "--porcelain"), "")
+
+    def test_link_refuses_a_checkout_that_cannot_commit_before_calling_google(self) -> None:
+        path = self.directory / "spec.md"
+        path.write_text(block(FIRST))
+        self.git(self.artifacts, "switch", "-c", "elsewhere")
+        for args in (("link", str(path)), ("link", str(path), DOC)):
+            with self.subTest(args=args):
+                self.assertIn("committed only on main", self.gdoc(*args, ok=False).stderr)
+        self.assertEqual(self.calls(), [])
 
     def test_create_leaves_pending_marks_when_its_push_fails(self) -> None:
         path = self.directory / "spec.md"

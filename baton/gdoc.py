@@ -35,6 +35,9 @@ PLACEHOLDER_PREFIX = "baton-gdoc-diagram-"
 HEADER = re.compile(r"<!-- baton-gdoc: archive of .*-->")
 MARK = re.compile(r"<!-- baton-gdoc (?:image=([\w.-]+)(?: sha256=([0-9a-f]{64}))?|placeholder=([a-z0-9-]+)) -->")
 FENCE = re.compile(r"( {0,3})(`{3,}|~{3,})(.*)")
+NESTED_MERMAID = re.compile(r"(?:[ \t]*>[ \t]?)+[ \t]*(?:`{3,}|~{3,})[ \t]*mermaid\b|"
+                            r"(?: {4,}|\t)[ \t]*(?:[-*+]|\d+[.)])?[ \t]*(?:`{3,}|~{3,})[ \t]*mermaid\b|"
+                            r" {0,3}(?:[-*+]|\d+[.)])[ \t]+(?:`{3,}|~{3,})[ \t]*mermaid\b", re.IGNORECASE)
 PLACEHOLDER = re.compile(re.escape(PLACEHOLDER_PREFIX) + r"([a-z0-9-]+)")
 IMAGE_REFERENCE = re.compile(r"!\[[^\]]*\]\[(image\d+)\]")
 IMAGE_DEFINITION = re.compile(r"\[image\d+\]: <data:[^>]*>")
@@ -117,8 +120,15 @@ def fenced_blocks(lines: list[str]) -> list[tuple[int, int, str, bool]]:
 
 
 def parse_blocks(lines: list[str]) -> list[Block]:
+    fences = fenced_blocks(lines)
+    code = {number for start, end, _language, _closed in fences for number in range(start, end)}
+    nested = [number + 1 for number, line in enumerate(lines) if number not in code and NESTED_MERMAID.match(line)]
+    if nested:
+        # Such a block would get no mark, and the first pull would replace its diagram with a note.
+        raise ProjectError(f"Mermaid fence at line {', '.join(map(str, nested))} is inside a blockquote, list item or "
+                           "indented block; baton gdoc supports Mermaid blocks only at the top level. Move it there.")
     blocks = []
-    for start, end, language, closed in fenced_blocks(lines):
+    for start, end, language, closed in fences:
         if language != "mermaid":
             continue
         if not closed:
@@ -603,9 +613,10 @@ class Gdoc:
         return found[0]
 
     def clean(self, path: Path) -> bool:
-        tracked = bool(git(self.root, "--literal-pathspecs", "ls-files", "--", self.relative(path)))
-        return tracked and subprocess.run(["git", "-C", str(self.root), "--literal-pathspecs", "diff", "--quiet",
-                                           "HEAD", "--", self.relative(path)], capture_output=True).returncode == 0
+        """Tracked, with neither staged nor unstaged changes."""
+        relative = self.relative(path)
+        tracked = bool(git(self.root, "--literal-pathspecs", "ls-files", "--", relative))
+        return tracked and not git(self.root, "--literal-pathspecs", "status", "--porcelain", "--", relative)
 
     def require_clean(self, path: Path) -> None:
         if not self.clean(path):
@@ -655,6 +666,8 @@ class Gdoc:
                 return [*links, {"path": name, "document_id": document_id}]
             return update
 
+        # Fail before touching Google when the checkout could not take the commit.
+        self.manager.artifact_checkout(self.root, [self.relative(path), self.relative(self.links_path)])
         if url is not None:
             document_id = document_id_from(url)
             add(document_id)(self.read_links())
@@ -776,6 +789,11 @@ class Gdoc:
 
         def prepare() -> None:
             current = self.read(path)
+            # The add before the commit would replace a staged version, even when the file already holds the output.
+            if subprocess.run(["git", "-C", str(self.root), "--literal-pathspecs", "diff", "--cached", "--quiet", "HEAD",
+                               "--", self.relative(path)], capture_output=True).returncode:
+                raise ProjectError("The Markdown has staged changes, which a pull would destroy; commit or unstage "
+                                   "them first.")
             if current == new:
                 return
             if not self.clean(path):

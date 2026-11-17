@@ -112,11 +112,12 @@ the text just before it. Take IDs from that list.
 |---|---|
 | Unmarked Mermaid block | Add a mark before the fence: `image=ID` or `placeholder=NAME`, commit |
 | Several blocks marked the same | Make each mark unique, commit |
+| Mermaid fence inside a blockquote, list item or indented block | Move the block to the top level, commit |
 | Image no longer in the Doc and the Doc has unmarked images | It may have been cut and pasted: put the listed ID in the mark, or delete the block; commit, pull |
 | Placeholder missing from the Doc or appears several times | Add or fix the placeholder paragraph in the Doc, or delete the block and commit. If a push was interrupted, change the mark to `image=ID` with the listed ID, commit |
 | Image not alone in its own paragraph | Move the image to its own paragraph in the Doc, or delete the block and commit |
 | Export and Doc image counts differ | Set the text-wrapped image's wrapping to "In line" in the Doc, pull again |
-| Uncommitted changes | Commit or discard them; remember rule 1 |
+| Uncommitted or staged changes | Commit, unstage or discard them; remember rule 1 |
 | Markdown or Doc changed during the pull | Pull again |
 | Image not in the Doc; pull first | Pull, then push |
 | Fetch failed, or checkout behind origin | Retry when the remote is reachable; a checkout that cannot fast-forward needs the user |

@@ -63,6 +63,8 @@ A missing or malformed state file shows no links.
 
 A comment elsewhere, or inside another code fence, is not a mark. Pull and push
 refuse a file with an unmarked Mermaid block or a repeated image ID or name.
+Mermaid blocks must be at the top level: a Mermaid fence inside a blockquote,
+list item or indented block is refused by every command.
 
 ## Link
 
