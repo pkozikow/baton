@@ -43,6 +43,9 @@ class BuildProvenanceTest(unittest.TestCase):
             names = archive.namelist()
             self.assertIn('baton/cli.py', names)
             self.assertIn('baton/skills/baton-plan/SKILL.md', names)
+            for resource in ('SKILL.md', 'agents/openai.yaml'):
+                self.assertEqual(archive.read(f'baton/skills/baton-gdoc/{resource}'),
+                                 (source / 'agent-skills/baton-gdoc' / resource).read_bytes())
             reference = 'baton-plan/references/validation.md'
             self.assertEqual(archive.read(f'baton/skills/{reference}'),
                              (source / 'agent-skills' / reference).read_bytes())

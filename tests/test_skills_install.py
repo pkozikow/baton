@@ -348,6 +348,7 @@ class SkillsInstallTest(unittest.TestCase):
                     install_skills([target])
 
     def test_bundled_policies_and_names(self) -> None:
+        self.assertIn("baton-gdoc", SKILLS)
         for name in SKILLS:
             skill = bundled_skills() / name
             with self.subTest(name=name):
