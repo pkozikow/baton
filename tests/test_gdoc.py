@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 from typing import Any
@@ -203,6 +204,11 @@ class TransformTest(unittest.TestCase):
         self.assertEqual(new, doc_id_in("```\nflowchart LR\n```\n\n~~~\ngraph\n~~~\n"))
         self.assertEqual(sum("mermaid label" in note for note in notes), 2)
 
+    def test_image_definitions_inside_code_blocks_are_kept(self) -> None:
+        export = "```\n[image1]: <data:image/png;base64,QUJD>\n```\n\n[image1]: <data:image/png;base64,AAAA>\n"
+        new, _ = self.pull("", export, document("x"))
+        self.assertEqual(new, doc_id_in("```\n[image1]: <data:image/png;base64,QUJD>\n```\n"))
+
     def test_spike_payload_counts_pending_suggestions_and_keeps_images_in_order(self) -> None:
         doc = json.loads((FIXTURES / "documents-get.json").read_text())
         export = (FIXTURES / "export.md").read_text()
@@ -239,6 +245,7 @@ class GdocCommandTest(unittest.TestCase):
     cli = fixtures.ProjectManagerTest.cli
     make_repo = fixtures.ProjectManagerTest.make_repo
     create = fixtures.ProjectManagerTest.create
+    checkout = fixtures.ProjectManagerTest.checkout
 
     def setUp(self) -> None:
         fixtures.ProjectManagerTest.setUp(self)
@@ -277,8 +284,8 @@ class GdocCommandTest(unittest.TestCase):
     def rendered(self) -> list[str]:
         return json.loads(self.mmdc_log.read_text())
 
-    def gdoc(self, *args: str, ok: bool = True) -> Any:
-        return self.cli("gdoc", *args, "--selector", "example", ok=ok)
+    def gdoc(self, *args: str, ok: bool = True, cwd: Path | None = None) -> Any:
+        return self.cli("gdoc", *args, "--selector", "example", ok=ok, cwd=cwd)
 
     def commits(self) -> int:
         return int(self.git(self.artifacts, "rev-list", "--count", "HEAD"))
@@ -370,13 +377,17 @@ class GdocCommandTest(unittest.TestCase):
     def test_pull_retries_once_when_the_revision_moves_then_refuses(self) -> None:
         path = self.linked("spec.md", "old\n")
         self.serve(document("New."), "New.\n")
-        revisions = [{"stdout": {"revisionId": value}} for value in ("r1", "r2", "r3", "r4")]
-        self.respond("revision", *revisions, target=DOC)
+        # The first read is the revision call; the second is the revision of the structure read after the export.
+        self.respond("revision", {"stdout": {"revisionId": "r1"}}, {"stdout": {"revisionId": "r3"}}, target=DOC)
+        self.respond("docs documents get", {"stdout": document("New.", revision="r2")},
+                     {"stdout": document("New.", revision="r4")}, target=DOC)
         result = self.gdoc("pull", ok=False)
         self.assertIn("changed during the export twice", result.stderr)
         self.assertEqual(len(self.calls("drive files export")), 2)
         self.assertEqual(path.read_text(), header(DOC) + "\n\nold\n")
-        self.respond("revision", *[{"stdout": {"revisionId": value}} for value in ("r1", "r2", "r3", "r3")], target=DOC)
+        self.respond("revision", {"stdout": {"revisionId": "r1"}}, {"stdout": {"revisionId": "r2"}}, target=DOC)
+        self.respond("docs documents get", {"stdout": document("New.", revision="r9")},
+                     {"stdout": document("New.", revision="r2")}, target=DOC)
         self.gdoc("pull")
         self.assertEqual(path.read_text(), header(DOC) + "\n\nNew.\n")
 
@@ -572,6 +583,8 @@ class GdocCommandTest(unittest.TestCase):
         path = self.directory / "spec.md"
         path.write_text(block(FIRST, "image=kix.b") + "\n" + block(SECOND))
         self.respond("docs documents get", {"stdout": document(P(image("kix.a")), P(image("kix.b")))}, target=DOC)
+        # Relative to the caller's directory, although gws runs from a temporary one.
+        self.env["GWS_BIN"] = os.path.relpath(self.env["GWS_BIN"], self.root)
         self.gdoc("link", str(path), DOC)
         self.assertEqual(path.read_text(), header(DOC) + "\n\n" + block(FIRST, "image=kix.b") + "\n"
                          + block(SECOND, image_mark("kix.a", SECOND)))
@@ -658,6 +671,52 @@ class GdocCommandTest(unittest.TestCase):
         self.assertEqual(self.git(self.artifacts, "status", "--porcelain"), "")
         self.assertEqual(self.calls(), [])
         self.assertIn("not linked", self.gdoc("unlink", str(path), ok=False).stderr)
+
+    def test_pull_and_push_from_a_branch_checkout_leave_other_subplans_alone(self) -> None:
+        self.cli("branch", "add", "alpha", "docs", cwd=self.slots / "p3")
+        docs = self.checkout("alpha", "example--docs")
+        own = self.directory / "branches" / "alpha" / "example--docs" / "plan.md"
+        other = self.directory / "branches" / "alpha" / "example" / "plan.md"
+        for path in (own, other):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(header(DOC) + "\n\nold\n")
+        names = [str(path.relative_to(self.directory)) for path in (own, other)]
+        (self.directory / "gdoc-links.json").write_text(json.dumps({"links": [
+            {"path": names[0], "document_id": DOC}, {"path": names[1], "document_id": OTHER}]}))
+        self.commit_files("Link subplans", own, other, self.directory / "gdoc-links.json")
+        self.serve(document("Mine."), "Mine.\n")
+        self.serve(document("Theirs."), "Theirs.\n", target=OTHER)
+        result = self.gdoc("pull", cwd=docs)
+        self.assertIn(f"{names[1]}: skipped", result.stdout)
+        self.assertEqual(own.read_text(), header(DOC) + "\n\nMine.\n")
+        self.assertEqual(other.read_text(), header(DOC) + "\n\nold\n")
+        for args in (("pull", str(other)), ("push", str(other)), ("unlink", str(other))):
+            with self.subTest(args=args):
+                self.assertIn("another branch's subplan", self.gdoc(*args, ok=False, cwd=docs).stderr)
+        self.assertFalse([call for call in self.calls() if OTHER in call["params"].values()])
+
+    def test_unsafe_link_records_are_refused(self) -> None:
+        self.linked("spec.md", "text\n")
+        for record in ({"path": "../outside.md", "document_id": DOC}, {"path": "gdoc-links.json", "document_id": DOC},
+                       {"path": "/etc/spec.md", "document_id": DOC}, {"path": "spec.md", "document_id": "x -->"}):
+            with self.subTest(record=record):
+                (self.directory / "gdoc-links.json").write_text(json.dumps({"links": [record]}))
+                self.assertIn("Malformed", self.gdoc("pull", ok=False).stderr)
+                data = json.loads(self.cli("status", "--selector", "example", "--json").stdout)
+                self.assertEqual(data["gdoc_links"], [])
+        self.assertEqual(self.calls(), [])
+
+    def test_failed_unlink_commit_explains_how_to_finish(self) -> None:
+        path = self.linked("spec.md", "Text.\n\n" + block(FIRST, "image=kix.a"))
+        lock = self.artifacts / ".git" / "index.lock"
+        lock.write_text("")
+        result = self.gdoc("unlink", str(path), ok=False)
+        self.assertIn("written but not committed", result.stderr)
+        self.assertEqual(path.read_text(), "Text.\n\n" + block(FIRST))
+        lock.unlink()
+        self.cli("artifacts", "commit", "--selector", "example", "-m", "Unlink", str(path),
+                 str(self.directory / "gdoc-links.json"))
+        self.assertEqual(self.git(self.artifacts, "status", "--porcelain"), "")
 
     # tools and status
 

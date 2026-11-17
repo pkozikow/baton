@@ -2,7 +2,8 @@
 
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import re
 import shlex
 import shutil
 import subprocess
@@ -21,9 +22,14 @@ from .skills_install import bundled_skills
 
 def gdoc_links(directory: Path) -> list[dict[str, str]]:
     """Linked Google Docs, read directly so status never imports the optional gdoc module."""
+    state = directory / "gdoc-links.json"
     try:
-        links = json.loads((directory / "gdoc-links.json").read_text())["links"]
-        if not all(isinstance(link["path"], str) and isinstance(link["document_id"], str) for link in links):
+        links = [] if state.is_symlink() else json.loads(state.read_text())["links"]
+        # The same record rules as baton gdoc, since agents act on these paths.
+        if not all(isinstance(link["path"], str) and link["path"].endswith(".md")
+                   and not PurePosixPath(link["path"]).is_absolute() and ".." not in PurePosixPath(link["path"]).parts
+                   and isinstance(link["document_id"], str) and re.fullmatch(r"[\w-]+", link["document_id"])
+                   for link in links):
             return []
         return [{"path": str(directory / link["path"]), "url": f"https://docs.google.com/document/d/{link['document_id']}/edit"}
                 for link in links]

@@ -26,7 +26,9 @@ command behaves as before. There is nothing to configure.
 
 All commands take `--selector PROJECT`. Paths must be Markdown files inside the
 project's artifact directory and not symlinks; relative paths resolve against the
-current directory.
+current directory. As with `baton artifacts commit`, a branch checkout of a
+multi-branch project may not act on another branch's subplan, and a pull of all
+links skips them.
 
 | Command | Does |
 |---|---|
@@ -39,7 +41,8 @@ current directory.
 Every command except a `--dry-run` requires a
 [trusted runtime](installation.md#runtime-write-protection). Commits go through
 the same path as `baton artifacts commit`: they sync with and push to the artifact
-checkout's `origin` when it has one (`pull --no-push` commits locally only).
+checkout's `origin` when it has one (`pull --no-push` commits locally only). A pull
+syncs once before its first link and pushes once after its last.
 
 `baton status --json` lists the links as `gdoc_links`, each with `path` and `url`.
 A missing or malformed state file shows no links.
@@ -81,9 +84,9 @@ URL was printed (adopt it).
 
 ## Pull
 
-Pull reads the Doc's revision, exports it as Markdown, reads its structure, and
-reads the revision again; if it moved, it retries once, then refuses. In the
-export:
+Pull reads the Doc's revision, exports it as Markdown, then reads its structure,
+which carries the revision again; if it moved, it retries once, then refuses. In
+the export:
 
 | Found | Result |
 |---|---|

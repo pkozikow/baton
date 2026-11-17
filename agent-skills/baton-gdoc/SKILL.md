@@ -129,3 +129,5 @@ the text just before it. Take IDs from that list.
 
 Shared artifacts belong to the parent. Workers do not pull, push, link or unlink
 them; ask the parent through the blackboard, naming the file and what changed.
+From a branch checkout, the commands refuse other branches' subplans, and a pull
+of all links skips them.

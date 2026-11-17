@@ -14,7 +14,7 @@ import difflib
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
 import struct
@@ -281,7 +281,10 @@ def pull_text(current: str, export: str, structure: Structure, document_id: str)
     named = set(by_image)
     doc_ids = [image.object_id for image in structure.images]
     unmarked = [image for image in structure.images if image.object_id not in named]
-    kept = "".join(line for line in export.splitlines(keepends=True) if not IMAGE_DEFINITION.fullmatch(line.strip()))
+    raw = export.splitlines(keepends=True)
+    raw_code = {number for start, end, _language, _closed in fenced_blocks(raw) for number in range(start, end)}
+    kept = "".join(line for number, line in enumerate(raw)
+                   if number in raw_code or not IMAGE_DEFINITION.fullmatch(line.strip()))
     exported = (kept.rstrip("\n") + "\n").splitlines(keepends=True)
     code: set[int] = set()
     mermaid_fences: set[int] = set()
@@ -312,11 +315,11 @@ def pull_text(current: str, export: str, structure: Structure, document_id: str)
                             "or delete the block and commit, then pull again.")
         else:
             notes.append(f"Dropped the Mermaid block at {block.describe()}: its image was deleted from the Doc.")
-    placeholder_lines: dict[str, list[int]] = {}
+    placeholder_at: dict[int, str] = {}
     for number, line in enumerate(exported):
         match = PLACEHOLDER.fullmatch(line.strip().lower())
         if number not in code and match and match[1] in by_name:
-            placeholder_lines.setdefault(match[1], []).append(number)
+            placeholder_at[number] = match[1]
     for name, block in by_name.items():
         count = len(structure.placeholders.get(name, []))
         if count != 1:
@@ -325,7 +328,7 @@ def pull_text(current: str, export: str, structure: Structure, document_id: str)
                             f"{where}. Add or fix it in the Doc as its own paragraph, or delete the block and commit. "
                             "If a push was interrupted the image may already be in the Doc: change the mark to "
                             "image=ID with an ID listed below, and commit.")
-        elif len(placeholder_lines.get(name, [])) != 1:
+        elif list(placeholder_at.values()).count(name) != 1:
             problems.append(f"The placeholder {PLACEHOLDER_PREFIX}{name} is not on a line of its own in the export; "
                             "remove any formatting from that paragraph in the Doc and pull again.")
     output: list[str] = []
@@ -355,8 +358,7 @@ def pull_text(current: str, export: str, structure: Structure, document_id: str)
                 notes.append(f"Image {image.object_id} is not a diagram from this file; archived as a note.")
             output.append(line)
         else:
-            match = PLACEHOLDER.fullmatch(line.strip().lower())
-            output.append(by_name[match[1]].text(lines) if match and match[1] in by_name else line)
+            output.append(by_name[placeholder_at[number]].text(lines) if number in placeholder_at else line)
     if problems:
         raise refusal(problems, structure.images, named)
     if structure.suggestions:
@@ -412,7 +414,8 @@ def tool(name: str, variable: str, hint: str) -> str:
     found = shutil.which(os.environ.get(variable) or name)
     if not found:
         raise ProjectError(f"{name} not found (set {variable} or put it on PATH); {hint}.")
-    return found
+    # Commands run from a temporary directory, where a relative path would no longer resolve.
+    return str(Path(found).absolute())
 
 
 def gws(command: str, params: dict[str, Any], body: dict[str, Any] | None = None, *, upload: bytes | None = None,
@@ -459,11 +462,24 @@ def get_document(document_id: str) -> dict[str, Any]:
     return gws("docs documents get", {"documentId": document_id, "includeTabsContent": True})
 
 
-def revision(document_id: str) -> str:
-    value = gws("docs documents get", {"documentId": document_id, "fields": "revisionId"}).get("revisionId")
+def revision_of(document: dict[str, Any]) -> str:
+    value = document.get("revisionId")
     if not isinstance(value, str) or not value:
         raise ProjectError("The Doc returned no revisionId; baton gdoc needs edit access to it.")
     return value
+
+
+def revision(document_id: str) -> str:
+    return revision_of(gws("docs documents get", {"documentId": document_id, "fields": "revisionId"}))
+
+
+def create_doc(name: str, content: bytes, content_type: str) -> str:
+    """Import a file into a new Google Doc and return its ID."""
+    created = gws("drive files create", {"fields": "id"}, {"name": name, "mimeType": DOC_MIME},
+                  upload=content, upload_type=content_type)
+    if not isinstance(created.get("id"), str) or not created["id"]:
+        raise ProjectError("gws drive files create returned no file ID.")
+    return str(created["id"])
 
 
 def render(block: Block) -> bytes:
@@ -496,13 +512,8 @@ def image_size(png: bytes, text_width: float) -> dict[str, Any]:
 
 def image_uri(png: bytes, temporary: list[str]) -> str:
     # A PNG imported as a private Doc yields a short-lived image URI without sharing anything publicly.
-    created = gws("drive files create", {"fields": "id"},
-                  {"name": "baton gdoc temporary image (safe to delete)", "mimeType": DOC_MIME},
-                  upload=png, upload_type="image/png")
-    if not isinstance(created.get("id"), str):
-        raise ProjectError("gws drive files create returned no file ID.")
-    temporary.append(created["id"])
-    document = get_document(created["id"])
+    temporary.append(create_doc("baton gdoc temporary image (safe to delete)", png, "image/png"))
+    document = get_document(temporary[-1])
     uris = [item.get("inlineObjectProperties", {}).get("embeddedObject", {}).get("imageProperties", {}).get("contentUri")
             for tab in document.get("tabs", []) for item in tab.get("documentTab", {}).get("inlineObjects", {}).values()]
     uris = [uri for uri in uris if isinstance(uri, str)]
@@ -530,6 +541,13 @@ class Gdoc:
         self.directory = directory.resolve()
         self.root = manager.artifacts_git(directory)
         self.links_path = self.directory / LINKS_FILE
+        owned = manager.owned_artifacts(project, directory)
+        self.owned = owned.resolve() if owned is not None else None
+
+    def foreign(self, path: Path) -> bool:
+        """Another branch's subplan, which baton artifacts commit would also refuse from this checkout."""
+        return (self.owned is not None and inside(path, self.directory / "branches")
+                and not inside(path, self.owned))
 
     def artifact(self, supplied: str) -> Path:
         path = Path(os.path.abspath(supplied))
@@ -540,6 +558,9 @@ class Gdoc:
             raise ProjectError(f"Artifact path is outside {self.directory}: {supplied}")
         if resolved.suffix != ".md" or not resolved.is_file():
             raise ProjectError(f"Not a Markdown file: {supplied}")
+        if self.foreign(resolved):
+            raise ProjectError(f"{supplied} is another branch's subplan; from this branch checkout only {self.owned} "
+                               "is yours. Leave other subplans to their workers or the parent.")
         return resolved
 
     def name(self, path: Path) -> str:
@@ -555,9 +576,12 @@ class Gdoc:
             return []
         try:
             links = json.loads(self.links_path.read_text())["links"]
+            # Records come from Git, possibly another machine's commit: hold them to the command-line path rules.
             if not isinstance(links, list) or not all(
                     isinstance(link, dict) and isinstance(link.get("path"), str)
-                    and isinstance(link.get("document_id"), str) for link in links):
+                    and isinstance(link.get("document_id"), str) and re.fullmatch(r"[\w-]+", link["document_id"])
+                    and not PurePosixPath(link["path"]).is_absolute() and ".." not in PurePosixPath(link["path"]).parts
+                    and link["path"].endswith(".md") for link in links):
                 raise TypeError
         except (ValueError, KeyError, TypeError) as error:
             raise ProjectError(f"Malformed {self.links_path}; fix or restore it from Git.") from error
@@ -604,7 +628,13 @@ class Gdoc:
             links = update(self.read_links())
             path.write_bytes(new.encode())
             self.write_links(links)
-        self.commit(message, [path, self.links_path], prepare)
+        try:
+            self.commit(message, [path, self.links_path], prepare)
+        except ProjectError as error:
+            if self.read(path) == new != original:
+                raise ProjectError(f"{error}\nThe change is written but not committed; commit it with: "
+                                   f"baton artifacts commit -m '{message}' {path} {self.links_path}") from error
+            raise
 
     def link(self, supplied: str, url: str | None, title: str | None) -> None:
         path = self.artifact(supplied)
@@ -636,22 +666,17 @@ class Gdoc:
         for number, block in reversed(list(enumerate(blocks, 1))):
             imported[block.fence:block.end] = [f"\n{PLACEHOLDER_PREFIX}{number}\n\n"]
             lines.insert(block.fence, mark_line(placeholder=str(number)) + "\n")
-        heading = next((line[2:].strip() for line in lines if line.startswith("# ")), "")
-        created = gws("drive files create", {"fields": "id"},
-                      {"name": title or heading or path.stem, "mimeType": DOC_MIME},
-                      upload="".join(imported).encode(), upload_type="text/markdown")
-        document_id = created.get("id")
-        if not isinstance(document_id, str):
-            raise ProjectError("gws drive files create returned no file ID.")
+        code = {number for start, end, _language, _closed in fenced_blocks(lines) for number in range(start, end)}
+        heading = next((line[2:].strip() for number, line in enumerate(lines)
+                        if number not in code and line.startswith("# ")), "")
+        document_id = create_doc(title or heading or path.stem, "".join(imported).encode(), "text/markdown")
         print(f"Created {doc_url(document_id)}", flush=True)
         try:
             self.save(path, original, with_header(document_id, "".join(lines)), add(document_id),
                       f"Link {name} to a new Google Doc")
         except ProjectError as error:
             if any(link["document_id"] == document_id for link in self.read_links()):
-                raise ProjectError(f"{error}\nThe link to {doc_url(document_id)} is written but not committed; commit "
-                                   f"{path} and {self.links_path} with baton artifacts commit, then run "
-                                   f"baton gdoc push {path}") from error
+                raise ProjectError(f"{error}\nThen run baton gdoc push {path}") from error
             raise ProjectError(f"{error}\nThe Doc was created but not linked; adopt it with: "
                                f"baton gdoc link {path} {doc_url(document_id)}") from error
         print(f"Linked {name} to {doc_url(document_id)}", flush=True)
@@ -677,22 +702,40 @@ class Gdoc:
         print(f"Unlinked {name}; the Google Doc is unchanged.")
 
     def pull(self, supplied: list[str], dry_run: bool, push: bool) -> int:
-        links = self.read_links()
-        if supplied:
-            links = [self.link_for(self.artifact(path)) for path in supplied]
+        paths = [self.artifact(path) for path in supplied]
+        # Sync once for the whole run rather than once per committed link.
+        remote = push and not dry_run and "origin" in git(self.root, "remote").splitlines()
+        default = self.manager.artifact_checkout(self.root, []) if remote else ""
+        fetched = remote and self.manager.fetch_artifacts(self.root, default)
+        if fetched:
+            with self.manager.artifacts_lock(self.root):
+                self.manager.fast_forward_artifacts(self.root, default, artifacts_root=self.directory.parent)
+        if paths:
+            links = [self.link_for(path) for path in paths]
+        else:
+            links = []
+            for link in self.read_links():
+                if self.foreign(self.directory / link["path"]):
+                    print(f"{link['path']}: skipped; it is another branch's subplan.")
+                else:
+                    links.append(link)
         if not links:
-            print("No artifacts in this project are linked to a Google Doc.")
-            return 0
+            print("No artifacts to pull are linked to a Google Doc.")
         failed = 0
         for link in links:
             try:
-                self.pull_one(link, dry_run, push)
-            except ProjectError as error:
+                self.pull_one(link, dry_run)
+            except (ProjectError, OSError, ValueError) as error:
                 failed += 1
                 print(f"baton gdoc: {link['path']}: not pulled: {error}", file=sys.stderr, flush=True)
+        if fetched:
+            self.manager.push_artifacts(self.root, default, artifacts_root=self.directory.parent)
+        elif remote:
+            self.manager.artifact_warning(self.root, default, "Push skipped because fetch failed; pulled archives are "
+                                                              "committed locally. Pull again to publish them.")
         return 1 if failed else 0
 
-    def pull_one(self, link: dict[str, str], dry_run: bool, push: bool) -> None:
+    def pull_one(self, link: dict[str, str], dry_run: bool) -> None:
         path = self.directory / link["path"]
         if not inside(path.resolve(), self.directory) or path.is_symlink() or not path.is_file():
             raise ProjectError(f"Linked artifact is missing or unsafe: {path}")
@@ -702,7 +745,8 @@ class Gdoc:
             before = revision(document_id)
             export = gws("drive files export", {"fileId": document_id, "mimeType": "text/markdown"}, download=True)
             document = get_document(document_id)
-            if revision(document_id) == before:
+            # The structure's own revision, read after the export, brackets the export with the first read.
+            if revision_of(document) == before:
                 break
             print(f"baton gdoc: {link['path']}: the Doc changed during the export; retrying once.", file=sys.stderr)
         else:
@@ -733,7 +777,8 @@ class Gdoc:
                 raise ProjectError("The Markdown changed while the Doc was exported, perhaps by another pull; "
                                    "nothing was written. Pull again.")
             path.write_bytes(new.encode())
-        self.commit(f"Pull {link['path']} from its Google Doc", [path], prepare, push=push)
+        self.manager.commit_artifact_paths(self.root, f"Pull {link['path']} from its Google Doc", [self.relative(path)],
+                                           push=False, sync=False, artifacts_root=self.directory.parent, prepare=prepare)
 
     def require_current(self) -> None:
         """Push changes the Doc irreversibly, so unlike plain artifact commits it refuses a stale checkout."""
@@ -759,7 +804,7 @@ class Gdoc:
     def push(self, supplied: str, dry_run: bool) -> None:
         path = self.artifact(supplied)
         name = self.name(path)
-        document_id = self.link_for(path)["document_id"]
+        self.link_for(path)
         blocks = parse_blocks(self.read(path).splitlines(keepends=True))
         require_marked(blocks)
         if not any(block.placeholder is not None or block.stale for block in blocks):
@@ -768,15 +813,14 @@ class Gdoc:
         self.require_clean(path)
         if not dry_run:
             self.require_current()
-        # The fast-forward may have changed the file, so everything below works from this read.
+        # The fast-forward may have changed the file or its link, so everything below works from these reads.
+        document_id = self.link_for(path)["document_id"]
         original = self.read(path)
         blocks = parse_blocks(original.splitlines(keepends=True))
         require_marked(blocks)
         document = get_document(document_id)
         structure = read_structure(document)
-        document_revision = document.get("revisionId")
-        if not isinstance(document_revision, str) or not document_revision:
-            raise ProjectError("The Doc returned no revisionId; baton gdoc needs edit access to it.")
+        document_revision = revision_of(document)
         named = {block.image for block in blocks if block.image is not None}
         images = {image.object_id: image for image in structure.images}
         problems: list[str] = []
@@ -823,8 +867,9 @@ class Gdoc:
 
             def prepare() -> None:
                 self.require_not_behind()
-                if self.read(path) != original:
-                    raise ProjectError(f"{name} changed during the push; nothing was sent to the Doc. Push again.")
+                if self.read(path) != original or self.link_for(path)["document_id"] != document_id:
+                    raise ProjectError(f"{name} or its link changed during the push; nothing was sent to the Doc. "
+                                       "Push again.")
                 state["attempted"] = True
                 reply = gws("docs documents batchUpdate", {"documentId": document_id},
                             {"requests": requests, "writeControl": {"requiredRevisionId": document_revision}},
@@ -843,11 +888,12 @@ class Gdoc:
 
             try:
                 self.commit(f"Push diagrams of {name} to its Google Doc", [path], prepare)
-            except ProjectError as error:
+            except (ProjectError, OSError) as error:
                 if state["ids"] is not None:
                     listing = "\n".join(f"  {target.block.describe()} -> image={state['ids'][target.block.first]}"
                                         for target in targets)
-                    raise ProjectError(f"{error}\nThe Doc was updated and {name} holds the new marks:\n{listing}\n"
+                    raise ProjectError(f"{error}\nThe Doc was updated; the blocks' new marks are:\n{listing}\n"
+                                       f"{name} normally holds them already (set them by hand if not, without sha256). "
                                        f"Commit it with: baton artifacts commit -m 'Push diagrams of {name}' {path}"
                                        ) from error
                 if state["attempted"]:
@@ -856,7 +902,7 @@ class Gdoc:
         finally:
             for file_id in temporary:
                 try:
-                    gws("drive files delete", {"fileId": file_id})
+                    gws("drive files delete", {"fileId": file_id}, timeout=30)
                 except ProjectError as error:
                     print(f"baton gdoc: warning: could not delete temporary Doc {file_id}: {error}", file=sys.stderr)
         for target in targets:
