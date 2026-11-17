@@ -23,6 +23,9 @@ All other skills require explicit invocation, with both
 - `baton-review-loop`: a configurable focused-review list followed by a bounded
   number of general rounds; either phase can be disabled.
 - `baton-retro`: evidence-based project retrospective and note archival.
+- `baton-gdoc`: linking artifacts to Google Docs, pulling them into their Markdown
+  archives, pushing Mermaid diagrams, and recovering from refusals; see
+  [Google Doc archives](gdoc.md).
 
 `baton retro` explicitly invokes the bundled `baton-retro` skill, even if skills have
 not been installed separately. Installing and updating skills is covered in

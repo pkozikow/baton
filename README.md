@@ -49,6 +49,7 @@ own a project, and they run the review and retrospective workflows. The runtime 
 - [`uv`](https://docs.astral.sh/uv/) for installation
 - GitHub CLI (`gh`) for pull request and native stack operations
 - Optional: Codex, Claude Code, Antigravity, or Cursor as project owners, reviewers and retro authors
+- Optional: `gws` (Google Workspace CLI) and `mmdc` (Mermaid CLI) for [Google Doc archives](docs/gdoc.md)
 
 ## Install
 
@@ -140,6 +141,7 @@ preferences are described in [Configuration](docs/configuration.md). The bundled
 - [Skills and reviews](docs/skills.md): bundled skills and review execution
 - [Blackboard and tasks](docs/blackboard-and-tasks.md): SQLite board, tasks, export, sealing
 - [Retrospectives](docs/retrospectives.md): interactive and unattended retros, plus weekly cross-project reports
+- [Google Doc archives](docs/gdoc.md): share an artifact as a Google Doc and pull it back into Git
 - [Changelog](CHANGELOG.md): changes and supported formats
 
 ## Development
