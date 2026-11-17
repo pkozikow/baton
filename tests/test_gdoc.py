@@ -7,7 +7,7 @@ from typing import Any
 import unittest
 
 from baton.errors import ProjectError
-from baton.gdoc import adopt_text, header, pull_text, read_structure
+from baton.gdoc import adopt_text, header, image_size, pull_text, read_structure
 
 import test_project_manager as fixtures
 from test_project_manager import artifact_path
@@ -228,6 +228,11 @@ class TransformTest(unittest.TestCase):
         current = block(FIRST, "placeholder=cell")
         self.refused(current, "| baton-gdoc-diagram-cell |\n| :- |\n",
                      document(Table([P("baton-gdoc-diagram-cell")])), "is missing from the Doc")
+
+    def test_rendered_size_accounts_for_the_render_scale_and_text_width(self) -> None:
+        png = b"\x89PNG\r\n\x1a\n" + bytes(8) + (800).to_bytes(4, "big") + (400).to_bytes(4, "big")
+        self.assertEqual(image_size(png, 468)["width"]["magnitude"], 300)
+        self.assertEqual(image_size(png, 200)["height"]["magnitude"], 100)
 
     def test_adopt_pairs_unmarked_blocks_with_unnamed_images_in_order(self) -> None:
         current = ("# T\n\n" + block(FIRST) + "\ntext\n\n" + block(SECOND, "image=kix.b") + "\n" + block(THIRD))
@@ -662,6 +667,25 @@ class GdocCommandTest(unittest.TestCase):
         self.assertEqual(json.loads((self.directory / "gdoc-links.json").read_text())["links"][0]["document_id"], DOC)
         self.assertEqual(self.git(self.artifacts, "status", "--porcelain"), "")
         self.assertFalse(self.calls("docs documents batchUpdate"))
+
+    def test_create_that_cannot_record_its_link_explains_how_to_adopt_the_doc(self) -> None:
+        path = self.directory / "spec.md"
+        path.write_text("Text.\n\n" + block(FIRST) + "\n" + block(SECOND))
+        edited = "Edited meanwhile.\n\n" + block(FIRST) + "\n" + block(SECOND)
+        self.respond("drive files create", {"stdout": {"id": DOC}, "write": {str(path): edited}})
+        result = self.gdoc("link", str(path), ok=False)
+        self.assertIn("changed while the command ran", result.stderr)
+        self.assertIn("placeholder=1 to placeholder=2", result.stderr)
+        self.assertIn(f"baton gdoc link {path} https://docs.google.com/document/d/{DOC}/edit", result.stderr)
+        self.assertFalse((self.directory / "gdoc-links.json").exists())
+        path.write_text("Edited meanwhile.\n\n" + block(FIRST, "placeholder=1") + "\n" + block(SECOND, "placeholder=2"))
+        doc = document("Edited meanwhile.", "baton-gdoc-diagram-1", "baton-gdoc-diagram-2")
+        self.respond("docs documents get", {"stdout": doc}, target=DOC)
+        self.gdoc("link", str(path), f"https://docs.google.com/document/d/{DOC}/edit")
+        self.serve_push(doc)
+        self.gdoc("push", str(path))
+        self.assertEqual(path.read_text(), header(DOC) + "\n\nEdited meanwhile.\n\n" + block(FIRST, image_mark("kix.n2", FIRST))
+                         + "\n" + block(SECOND, image_mark("kix.n1", SECOND)))
 
     def test_unlink_removes_header_marks_and_link(self) -> None:
         path = self.linked("spec.md", "Text.\n\n" + block(FIRST, image_mark("kix.a", FIRST)) + block(SECOND, "placeholder=x"))

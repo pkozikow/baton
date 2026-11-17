@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shlex
 import shutil
 import struct
 import subprocess
@@ -39,6 +40,7 @@ IMAGE_REFERENCE = re.compile(r"!\[[^\]]*\]\[(image\d+)\]")
 IMAGE_DEFINITION = re.compile(r"\[image\d+\]: <data:[^>]*>")
 DOC_URL = re.compile(r"https://docs\.google\.com/document/(?:u/\d+/)?d/([\w-]+)(?:[/?#].*)?")
 BATCH_TIMEOUT = 60
+RENDER_SCALE = 2
 GWS_HINT = "install the Google Workspace CLI (gws) and sign in with `gws auth login`"
 MMDC_HINT = "install the Mermaid CLI (`npm install -g @mermaid-js/mermaid-cli`)"
 
@@ -488,7 +490,7 @@ def render(block: Block) -> bytes:
         source.write_text(block.source)
         try:
             result = subprocess.run([tool("mmdc", "MMDC_BIN", MMDC_HINT), "-i", str(source), "-o", str(image),
-                                     "-w", "1600", "-s", "2", "-q"], capture_output=True, text=True, timeout=120)
+                                     "-w", "1600", "-s", str(RENDER_SCALE), "-q"], capture_output=True, text=True, timeout=120)
         except subprocess.TimeoutExpired as error:
             raise ProjectError(f"mmdc timed out rendering the block at {block.describe()}.") from error
         if result.returncode or not image.is_file():
@@ -506,7 +508,8 @@ def image_size(png: bytes, text_width: float) -> dict[str, Any]:
     width, height = struct.unpack(">II", png[16:24])
     if not width or not height or width * height > 25_000_000:
         raise ProjectError("A rendered diagram exceeds Google Docs' 25 megapixel image limit.")
-    scale = min(text_width / width, 0.75)
+    # A CSS pixel is 0.75 pt, and mmdc renders RENDER_SCALE device pixels per CSS pixel.
+    scale = min(text_width / width, 0.75 / RENDER_SCALE)
     return {"width": {"magnitude": width * scale, "unit": "PT"}, "height": {"magnitude": height * scale, "unit": "PT"}}
 
 
@@ -633,7 +636,8 @@ class Gdoc:
         except ProjectError as error:
             if self.read(path) == new != original:
                 raise ProjectError(f"{error}\nThe change is written but not committed; commit it with: "
-                                   f"baton artifacts commit -m '{message}' {path} {self.links_path}") from error
+                                   f"{shlex.join(['baton', 'artifacts', 'commit', '-m', message, str(path), str(self.links_path)])}"
+                                   ) from error
             raise
 
     def link(self, supplied: str, url: str | None, title: str | None) -> None:
@@ -676,16 +680,20 @@ class Gdoc:
                       f"Link {name} to a new Google Doc")
         except ProjectError as error:
             if any(link["document_id"] == document_id for link in self.read_links()):
-                raise ProjectError(f"{error}\nThen run baton gdoc push {path}") from error
-            raise ProjectError(f"{error}\nThe Doc was created but not linked; adopt it with: "
-                               f"baton gdoc link {path} {doc_url(document_id)}") from error
+                raise ProjectError(f"{error}\nThen run: {shlex.join(['baton', 'gdoc', 'push', str(path)])}") from error
+            adopt = shlex.join(["baton", "gdoc", "link", str(path), doc_url(document_id)])
+            # The new Doc holds placeholder paragraphs, not images, so adoption needs the matching pending marks.
+            marks = (f" First mark its Mermaid blocks, in order, placeholder=1 to placeholder={len(blocks)} "
+                     "(`<!-- baton-gdoc placeholder=1 -->` on the line before each fence); after linking, push."
+                     if blocks else "")
+            raise ProjectError(f"{error}\nThe Doc was created but not linked.{marks} Adopt it with: {adopt}") from error
         print(f"Linked {name} to {doc_url(document_id)}", flush=True)
         if blocks:
             try:
                 self.push(str(path), dry_run=False)
             except ProjectError as error:
-                raise ProjectError(f"{error}\nThe link is recorded and its diagrams are pending; fix the cause and run "
-                                   f"baton gdoc push {path}") from error
+                raise ProjectError(f"{error}\nThe link is recorded and its diagrams are pending; fix the cause and run: "
+                                   f"{shlex.join(['baton', 'gdoc', 'push', str(path)])}") from error
 
     def unlink(self, supplied: str) -> None:
         path = self.artifact(supplied)
@@ -894,7 +902,8 @@ class Gdoc:
                                         for target in targets)
                     raise ProjectError(f"{error}\nThe Doc was updated; the blocks' new marks are:\n{listing}\n"
                                        f"{name} normally holds them already (set them by hand if not, without sha256). "
-                                       f"Commit it with: baton artifacts commit -m 'Push diagrams of {name}' {path}"
+                                       "Commit it with: " + shlex.join(["baton", "artifacts", "commit", "-m",
+                                                                        f"Push diagrams of {name}", str(path)])
                                        ) from error
                 if state["attempted"]:
                     raise ProjectError(f"{error}\n{self.interrupted(document_id, targets, named)}") from error
