@@ -824,6 +824,7 @@ class Gdoc:
         # The fast-forward may have changed the file or its link, so everything below works from these reads.
         document_id = self.link_for(path)["document_id"]
         original = self.read(path)
+        self.require_clean(path)
         blocks = parse_blocks(original.splitlines(keepends=True))
         require_marked(blocks)
         document = get_document(document_id)
@@ -875,7 +876,8 @@ class Gdoc:
 
             def prepare() -> None:
                 self.require_not_behind()
-                if self.read(path) != original or self.link_for(path)["document_id"] != document_id:
+                if (self.read(path) != original or not self.clean(path)
+                        or self.link_for(path)["document_id"] != document_id):
                     raise ProjectError(f"{name} or its link changed during the push; nothing was sent to the Doc. "
                                        "Push again.")
                 state["attempted"] = True

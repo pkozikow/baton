@@ -344,6 +344,28 @@ class GdocCommandTest(unittest.TestCase):
         self.assertEqual(self.git(self.artifacts, "status", "--porcelain"), "")
         self.assertFalse(self.calls("docs documents batchUpdate"))
 
+    def test_pull_syncs_and_pushes_once_and_keeps_commits_when_fetch_fails(self) -> None:
+        first = self.linked("one.md", "old\n")
+        second = self.directory / "two.md"
+        second.write_text(header(OTHER) + "\n\nold two\n")
+        (self.directory / "gdoc-links.json").write_text(json.dumps({"links": [
+            {"path": "one.md", "document_id": DOC}, {"path": "two.md", "document_id": OTHER}]}))
+        self.commit_files("Link both", second, self.directory / "gdoc-links.json")
+        origin = self.add_origin()
+        self.serve(document("New."), "New.\n")
+        self.serve(document("Second."), "Second.\n", target=OTHER)
+        result = self.gdoc("pull")
+        self.assertEqual(result.stdout.count("Pushed"), 1)
+        self.assertIn("Pushed 2 artifact commits", result.stdout)
+        self.assertEqual(result.stderr.count("fetch origin"), 1)
+        self.assertEqual(self.git(origin, "rev-parse", "main"), self.git(self.artifacts, "rev-parse", "HEAD"))
+        self.serve(document("Newer."), "Newer.\n")
+        self.git(self.artifacts, "remote", "set-url", "origin", str(self.root / "missing.git"))
+        result = self.gdoc("pull", str(first))
+        self.assertIn("Push skipped because fetch failed", result.stderr)
+        self.assertEqual(first.read_text(), header(DOC) + "\n\nNewer.\n")
+        self.assertEqual(self.git(self.artifacts, "status", "--porcelain"), "")
+
     def test_refused_link_is_skipped_while_others_commit(self) -> None:
         first = self.directory / "one.md"
         second = self.directory / "two.md"
