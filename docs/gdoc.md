@@ -103,7 +103,9 @@ the export:
 | Export and structure image counts differ | Refused: set the text-wrapped image to "In line" |
 
 Refusals involving images list the Doc's unmarked images in order with the text
-before each. A fenced block labelled `mermaid` in the export loses the label.
+before each. A fenced block labelled `mermaid` in the export loses the label, and
+a restored block gets a blank line on each side where the export joined it to the
+neighbouring text with hard line breaks.
 Everything else is kept as exported, and pull reports the number of pending
 suggestions: suggested insertions export as ordinary text and text suggested for
 deletion is still exported.
@@ -129,15 +131,21 @@ It then renders each pending or stale block with `mmdc`, uploads each PNG as a
 temporary private Doc to get an image URI, and, under the artifact commit lock,
 sends one `documents.batchUpdate` guarded by the Doc's revision: a stale image is
 deleted and the new one inserted in its place (re-rendering keeps the new
-diagram's shape but detaches a comment placed only on the old image), and a
+diagram's shape but detaches a comment placed only on the old image, and shrinks
+the anchor of one spanning text and the image to its text part), and a
 placeholder paragraph's text is replaced by the image. The marks are rewritten
 with the new image IDs and hashes and committed. Temporary Docs are deleted
 afterwards.
 
-A `batchUpdate` that fails or times out may still have changed the Doc. Push then
-lists the Doc's unmarked images: for a diagram whose new image is listed, set its
-mark to `image=ID` without a hash and commit; the next push re-renders it. If the
-Doc changed but the commit failed, the file already holds the new marks; commit it.
+When Google refuses the `batchUpdate` because the Doc's revision moved after push
+read it (any edit or comment moves it), nothing was written; push says so, and
+pushing again is enough. Any other `batchUpdate` that fails or times out may still
+have changed the Doc. Push then lists the Doc's unmarked images: for a diagram
+whose new image is listed, set its mark to `image=ID` without a hash and commit;
+the next push re-renders it. If the Doc changed but the commit failed, the file
+already holds the new marks: fix the cause shown and run the printed commit
+command. Printed recovery commands carry `--selector` with the project's UUID, so
+they work from any directory.
 
 To add a diagram, put a paragraph `baton-gdoc-diagram-NAME` in the Doc where it
 belongs, add the Mermaid block to the Markdown marked `placeholder=NAME`, commit,

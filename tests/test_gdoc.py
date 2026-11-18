@@ -2,12 +2,15 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shlex
 import sys
+import tempfile
 from typing import Any
 import unittest
+from unittest import mock
 
 from baton.errors import ProjectError
-from baton.gdoc import adopt_text, header, image_size, pull_text, read_structure
+from baton.gdoc import adopt_text, context, gws, header, image_size, pull_text, read_structure, revision_rejected
 
 import test_project_manager as fixtures
 from test_project_manager import artifact_path
@@ -233,6 +236,48 @@ class TransformTest(unittest.TestCase):
         self.assertIn("SUGGESTEDINSERT", new)
         self.assertNotIn("data:image", new)
 
+    def test_restored_blocks_are_set_apart_from_text_joined_by_hard_line_breaks(self) -> None:
+        current = block(FIRST, image_mark("kix.a", FIRST)) + "\n" + block(SECOND, "placeholder=flow")
+        doc = document("Intro.", P(image("kix.a")), "baton-gdoc-diagram-flow", "End.")
+        hard = "Intro.  \n![][image1]  \nBaton-gdoc-diagram-flow  \nEnd.\n\n[image1]: <data:image/png;base64,AAAA>\n"
+        new, _ = self.pull(current, hard, doc)
+        self.assertEqual(new, doc_id_in("Intro.  \n\n" + block(FIRST, image_mark("kix.a", FIRST)) + "\n"
+                                        + block(SECOND, "placeholder=flow") + "\nEnd.\n"))
+        # Pulling the same export onto the new archive finds both marks and changes nothing.
+        self.assertEqual(self.pull(new, hard, doc)[0], new)
+        # Blocks already set apart by blank lines come out as before.
+        spaced = "Intro.\n\n![][image1]\n\nBaton-gdoc-diagram-flow\n\nEnd.\n"
+        self.assertEqual(self.pull(current, spaced, doc)[0],
+                         doc_id_in("Intro.\n\n" + block(FIRST, image_mark("kix.a", FIRST)) + "\n"
+                                   + block(SECOND, "placeholder=flow") + "\nEnd.\n"))
+
+    def test_image_context_starts_at_a_word(self) -> None:
+        text = "Each widget carries an API-inserted ID. Rejected widgets are kept for fourteen days."
+        structure = read_structure(document(text, P(image("kix.x"))))
+        self.assertEqual(structure.images[0].before, "ID. Rejected widgets are kept for fourteen days.")
+        self.assertEqual(context("Short   text.\n"), "Short text.")
+        self.assertEqual(context("cut " + "a" * 55 + " word"), "a" * 55 + " word")
+        self.assertEqual(context("x" * 70), "x" * 60)
+
+    def test_only_a_definite_revision_rejection_counts_as_nothing_written(self) -> None:
+        rejected = "The required revision ID 'ALBJ4Ls' does not match the latest revision."
+        self.assertTrue(revision_rejected(ProjectError(
+            f"gws docs documents batchUpdate failed (exit 1): error[api]: {rejected}\n{{\"code\": 400}}")))
+        for error in (ProjectError("gws docs documents batchUpdate failed (exit 1): deadline exceeded"),
+                      ProjectError(f"gws docs documents get failed (exit 1): {rejected}"),
+                      ProjectError("gws docs documents batchUpdate failed (exit 1): required revision ID does not match"),
+                      OSError(rejected)):
+            with self.subTest(error=error):
+                self.assertFalse(revision_rejected(error))
+        with tempfile.TemporaryDirectory() as directory:
+            slow = Path(directory) / "gws"
+            slow.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(5)\n")
+            slow.chmod(0o755)
+            with mock.patch.dict(os.environ, GWS_BIN=str(slow)), self.assertRaises(ProjectError) as caught:
+                gws("docs documents batchUpdate", {"documentId": DOC}, {"requests": []}, timeout=1)
+        self.assertIn("timed out", str(caught.exception))
+        self.assertFalse(revision_rejected(caught.exception))
+
     def test_placeholders_match_any_case_but_not_in_tables_or_lists(self) -> None:
         structure = read_structure(document("BATON-GDOC-DIAGRAM-top", Table([P("baton-gdoc-diagram-cell")]),
                                             P("baton-gdoc-diagram-item", bullet=True)))
@@ -319,6 +364,18 @@ class GdocCommandTest(unittest.TestCase):
         self.commit_files(f"Link {name}", path, self.directory / "gdoc-links.json")
         return path
 
+    def run_printed(self, stderr: str, prefix: str) -> list[str]:
+        """Run the command printed after `prefix` from a directory outside the project, as a user might."""
+        (line,) = [line for line in stderr.splitlines() if prefix in line]
+        words = shlex.split(line.split(prefix, 1)[1])
+        uuid = json.loads(self.cli("status", "--selector", "example", "--json").stdout)["uuid"]
+        self.assertEqual(words[0], "baton")
+        self.assertIn(["--selector", uuid], [words[n:n + 2] for n in range(len(words))])
+        outside = self.root / "elsewhere"
+        outside.mkdir(exist_ok=True)
+        self.cli(*words[1:], cwd=outside)
+        return words
+
     def add_origin(self) -> Path:
         origin = self.root / "artifacts.git"
         self.git(self.root, "init", "--bare", "-b", "main", str(origin))
@@ -355,6 +412,14 @@ class GdocCommandTest(unittest.TestCase):
         self.assertEqual(self.commits(), before + 2)
         self.assertEqual(self.git(self.artifacts, "status", "--porcelain"), "")
         self.assertFalse(self.calls("docs documents batchUpdate"))
+
+    def test_pull_of_hard_line_breaks_is_unchanged_the_second_time(self) -> None:
+        path = self.linked("spec.md", "old\n\n" + block(FIRST, image_mark("kix.a", FIRST)))
+        self.serve(document("Intro.", P(image("kix.a")), "End."), "Intro.  \n![][image1]  \nEnd.\n")
+        self.gdoc("pull")
+        self.assertEqual(path.read_text(), header(DOC) + "\n\nIntro.  \n\n" + block(FIRST, image_mark("kix.a", FIRST))
+                         + "\nEnd.\n")
+        self.assertIn("unchanged", self.gdoc("pull").stdout)
 
     def test_pull_syncs_and_pushes_once_and_keeps_commits_when_fetch_fails(self) -> None:
         first = self.linked("one.md", "old\n")
@@ -577,7 +642,7 @@ class GdocCommandTest(unittest.TestCase):
         self.assertIn("image=kix.n2", result.stderr)
         self.assertIn(block(SECOND, image_mark("kix.n2", SECOND)), path.read_text())
         lock.unlink()
-        self.cli("artifacts", "commit", "--selector", "example", "-m", "Push diagrams", str(path))
+        self.run_printed(result.stderr, "Fix the cause shown above, then commit it with: ")
         self.assertEqual(self.git(self.artifacts, "status", "--porcelain"), "")
         self.serve(document(P(image("kix.a")), P(image("kix.n2")), P(image("kix.n1"))),
                    "![][image1]\n\n![][image2]\n\n![][image3]\n")
@@ -604,6 +669,26 @@ class GdocCommandTest(unittest.TestCase):
         self.gdoc("push", str(path))
         self.assertIn(block(FIRST, image_mark("kix.final", FIRST)), path.read_text())
         self.assertEqual(self.git(self.artifacts, "status", "--porcelain"), "")
+
+    def test_push_rejected_for_a_moved_revision_says_nothing_was_written(self) -> None:
+        path, doc = self.three_diagrams()
+        committed = path.read_text()
+        rejection = {"code": 400, "message": "The required revision ID 'r1' does not match the latest revision.",
+                     "reason": "unknown"}
+        self.serve_push(doc, {"exit": 1, "stdout": {"error": rejection}})
+        before = self.commits()
+        result = self.gdoc("push", str(path), ok=False)
+        self.assertIn("baton gdoc: The Doc changed while the push ran (an edit or a comment counts), so Google refused "
+                      "the update: nothing was written to the Doc or the Markdown. Push again.", result.stderr)
+        self.assertNotIn("may still have been applied", result.stderr)
+        self.assertNotIn("Unmarked images", result.stderr)
+        self.assertEqual(len([call for call in self.calls("docs documents get") if call["params"]["documentId"] == DOC]), 1)
+        self.assertEqual(path.read_text(), committed)
+        self.assertEqual(self.commits(), before)
+        self.assertEqual(sorted(call["params"]["fileId"] for call in self.calls("drive files delete")), ["tmp-0", "tmp-1"])
+        self.serve_push(doc)
+        self.gdoc("push", str(path))
+        self.assertIn(block(THIRD, image_mark("kix.n1", THIRD)), path.read_text())
 
     def test_push_dry_run_lists_diagrams_and_changes_nothing(self) -> None:
         path, doc = self.three_diagrams()
@@ -733,12 +818,12 @@ class GdocCommandTest(unittest.TestCase):
         result = self.gdoc("link", str(path), ok=False)
         self.assertIn("changed while the command ran", result.stderr)
         self.assertIn("placeholder=1 to placeholder=2", result.stderr)
-        self.assertIn(f"baton gdoc link {path} https://docs.google.com/document/d/{DOC}/edit", result.stderr)
         self.assertFalse((self.directory / "gdoc-links.json").exists())
         path.write_text("Edited meanwhile.\n\n" + block(FIRST, "placeholder=1") + "\n" + block(SECOND, "placeholder=2"))
         doc = document("Edited meanwhile.", "baton-gdoc-diagram-1", "baton-gdoc-diagram-2")
         self.respond("docs documents get", {"stdout": doc}, target=DOC)
-        self.gdoc("link", str(path), f"https://docs.google.com/document/d/{DOC}/edit")
+        words = self.run_printed(result.stderr, "Adopt it with: ")
+        self.assertEqual(words[-2:], [str(path), f"https://docs.google.com/document/d/{DOC}/edit"])
         self.serve_push(doc)
         self.gdoc("push", str(path))
         self.assertEqual(path.read_text(), header(DOC) + "\n\nEdited meanwhile.\n\n" + block(FIRST, image_mark("kix.n2", FIRST))
@@ -795,9 +880,9 @@ class GdocCommandTest(unittest.TestCase):
         self.assertIn("written but not committed", result.stderr)
         self.assertEqual(path.read_text(), "Text.\n\n" + block(FIRST))
         lock.unlink()
-        self.cli("artifacts", "commit", "--selector", "example", "-m", "Unlink", str(path),
-                 str(self.directory / "gdoc-links.json"))
+        self.run_printed(result.stderr, "fix the cause shown above, then commit it with: ")
         self.assertEqual(self.git(self.artifacts, "status", "--porcelain"), "")
+        self.assertFalse((self.directory / "gdoc-links.json").exists())
 
     # tools and status
 

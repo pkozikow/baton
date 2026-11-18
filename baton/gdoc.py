@@ -42,6 +42,7 @@ PLACEHOLDER = re.compile(re.escape(PLACEHOLDER_PREFIX) + r"([a-z0-9-]+)")
 IMAGE_REFERENCE = re.compile(r"!\[[^\]]*\]\[(image\d+)\]")
 IMAGE_DEFINITION = re.compile(r"\[image\d+\]: <data:[^>]*>")
 DOC_URL = re.compile(r"https://docs\.google\.com/document/(?:u/\d+/)?d/([\w-]+)(?:[/?#].*)?")
+REVISION_REJECTED = re.compile(r"The required revision ID '[^'\n]*' does not match the latest revision\.")
 BATCH_TIMEOUT = 60
 RENDER_SCALE = 2
 GWS_HINT = "install the Google Workspace CLI (gws) and sign in with `gws auth login`"
@@ -205,6 +206,15 @@ def readable(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def context(text: str, limit: int = 60) -> str:
+    """The end of the readable text, at most `limit` characters, starting at a word."""
+    text = readable(text)
+    end = text[-limit:]
+    if len(text) > limit and text[-limit - 1] != " " and " " in end:
+        end = end.split(" ", 1)[1]
+    return end.lstrip()
+
+
 def read_structure(document: dict[str, Any]) -> Structure:
     try:
         return _read_structure(document)
@@ -237,7 +247,7 @@ def _read_structure(document: dict[str, Any]) -> Structure:
                 for element in elements:
                     if "inlineObjectElement" in element:
                         images.append(DocImage(element["inlineObjectElement"]["inlineObjectId"], element["startIndex"],
-                                               top and len(objects) == 1 and not text.strip(), readable(recent)[-60:].lstrip()))
+                                               top and len(objects) == 1 and not text.strip(), context(recent)))
                     recent = (recent + element.get("textRun", {}).get("content", ""))[-500:]
                 match = PLACEHOLDER.fullmatch(text.strip().lower())
                 if top and match and not objects and elements:
@@ -344,6 +354,7 @@ def pull_text(current: str, export: str, structure: Structure, document_id: str)
             problems.append(f"The placeholder {PLACEHOLDER_PREFIX}{name} is not on a line of its own in the export; "
                             "remove any formatting from that paragraph in the Doc and pull again.")
     output: list[str] = []
+    restored: set[int] = set()
     for number, line in enumerate(exported):
         if number in mermaid_fences:
             match = FENCE.fullmatch(line.rstrip("\r\n"))
@@ -358,6 +369,7 @@ def pull_text(current: str, export: str, structure: Structure, document_id: str)
             marked = [image for _match, image in items if image.object_id in by_image]
             if marked:
                 if len(items) == 1 and line.strip() == items[0][0][0] and marked[0].standalone:
+                    restored.add(len(output))
                     output.append(by_image[marked[0].object_id].text(lines))
                 else:
                     problems.append(f"The image of the block at {by_image[marked[0].object_id].describe()} is not "
@@ -369,14 +381,24 @@ def pull_text(current: str, export: str, structure: Structure, document_id: str)
                 line = line[:match.start()] + f"*(image {image.object_id} not archived)*" + line[match.end():]
                 notes.append(f"Image {image.object_id} is not a diagram from this file; archived as a note.")
             output.append(line)
+        elif number in placeholder_at:
+            restored.add(len(output))
+            output.append(by_name[placeholder_at[number]].text(lines))
         else:
-            output.append(by_name[placeholder_at[number]].text(lines) if number in placeholder_at else line)
+            output.append(line)
     if problems:
         raise refusal(problems, structure.images, named)
     if structure.suggestions:
         notes.append(f"The Doc has {structure.suggestions} pending suggestion(s); suggested insertions are archived "
                      "as ordinary text and text suggested for deletion is still archived.")
-    return with_header(document_id, "".join(output)), notes
+    # The export joins paragraphs with no empty paragraph between them by hard line breaks, which would leave a
+    # restored block glued to the text around it.
+    padded: list[str] = []
+    for position, text in enumerate(output):
+        if text.strip() and padded and padded[-1].strip() and (position in restored or position - 1 in restored):
+            padded.append("\n")
+        padded.append(text)
+    return with_header(document_id, "".join(padded)), notes
 
 
 def adopt_text(current: str, structure: Structure, document_id: str) -> str:
@@ -470,6 +492,16 @@ def gws(command: str, params: dict[str, Any], body: dict[str, Any] | None = None
     return response
 
 
+def revision_rejected(error: BaseException) -> bool:
+    """Whether batchUpdate definitely failed on requiredRevisionId, which Google checks before changing anything.
+
+    Anything less certain, such as a timeout, keeps the advice for an update that may have been applied.
+    """
+    text = str(error)
+    return (isinstance(error, ProjectError) and text.startswith("gws docs documents batchUpdate failed (exit ")
+            and REVISION_REJECTED.search(text) is not None)
+
+
 def get_document(document_id: str) -> dict[str, Any]:
     return gws("docs documents get", {"documentId": document_id, "includeTabsContent": True})
 
@@ -548,6 +580,7 @@ class Target:
 class Gdoc:
     def __init__(self, manager: Any, project: dict[str, Any]) -> None:
         self.manager = manager
+        self.uuid = project["uuid"]
         directory = manager.artifact_directory(project)
         if directory.is_symlink() or not directory.is_dir():
             raise ProjectError(f"Unsafe or missing project artifacts directory: {directory}")
@@ -581,6 +614,10 @@ class Gdoc:
 
     def relative(self, path: Path) -> str:
         return str(path.relative_to(self.root))
+
+    def command(self, action: list[str], *arguments: str) -> str:
+        """A command for the user to run; the full UUID makes it work from any directory."""
+        return shlex.join(["baton", *action, "--selector", self.uuid, *arguments])
 
     def read_links(self) -> list[dict[str, str]]:
         if self.links_path.is_symlink():
@@ -646,8 +683,9 @@ class Gdoc:
             self.commit(message, [path, self.links_path], prepare)
         except ProjectError as error:
             if self.read(path) == new != original:
-                raise ProjectError(f"{error}\nThe change is written but not committed; commit it with: "
-                                   f"{shlex.join(['baton', 'artifacts', 'commit', '-m', message, str(path), str(self.links_path)])}"
+                raise ProjectError(f"{error}\nThe change is written but not committed; fix the cause shown above, then "
+                                   "commit it with: "
+                                   f"{self.command(['artifacts', 'commit'], '-m', message, str(path), str(self.links_path))}"
                                    ) from error
             raise
 
@@ -693,8 +731,8 @@ class Gdoc:
                       f"Link {name} to a new Google Doc")
         except ProjectError as error:
             if any(link["document_id"] == document_id for link in self.read_links()):
-                raise ProjectError(f"{error}\nThen run: {shlex.join(['baton', 'gdoc', 'push', str(path)])}") from error
-            adopt = shlex.join(["baton", "gdoc", "link", str(path), doc_url(document_id)])
+                raise ProjectError(f"{error}\nThen run: {self.command(['gdoc', 'push'], str(path))}") from error
+            adopt = self.command(["gdoc", "link"], str(path), doc_url(document_id))
             # The new Doc holds placeholder paragraphs, not images, so adoption needs the matching pending marks.
             marks = (f" First mark its Mermaid blocks, in order, placeholder=1 to placeholder={len(blocks)} "
                      "(`<!-- baton-gdoc placeholder=1 -->` on the line before each fence); after linking, push."
@@ -706,7 +744,7 @@ class Gdoc:
                 self.push(str(path), dry_run=False)
             except ProjectError as error:
                 raise ProjectError(f"{error}\nThe link is recorded and its diagrams are pending; fix the cause and run: "
-                                   f"{shlex.join(['baton', 'gdoc', 'push', str(path)])}") from error
+                                   f"{self.command(['gdoc', 'push'], str(path))}") from error
 
     def unlink(self, supplied: str) -> None:
         path = self.artifact(supplied)
@@ -922,8 +960,12 @@ class Gdoc:
                                         for target in targets)
                     raise ProjectError(f"{error}\nThe Doc was updated; the blocks' new marks are:\n{listing}\n"
                                        f"{name} normally holds them already (set them by hand if not, without sha256). "
-                                       "Commit it with: " + shlex.join(["baton", "artifacts", "commit", "-m",
-                                                                        f"Push diagrams of {name}", str(path)])
+                                       "Fix the cause shown above, then commit it with: "
+                                       + self.command(["artifacts", "commit"], "-m", f"Push diagrams of {name}", str(path))
+                                       ) from error
+                if state["attempted"] and revision_rejected(error):
+                    raise ProjectError("The Doc changed while the push ran (an edit or a comment counts), so Google "
+                                       "refused the update: nothing was written to the Doc or the Markdown. Push again."
                                        ) from error
                 if state["attempted"]:
                     raise ProjectError(f"{error}\n{self.interrupted(document_id, targets, named)}") from error

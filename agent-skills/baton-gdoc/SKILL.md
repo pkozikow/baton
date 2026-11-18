@@ -86,7 +86,8 @@ the Doc when the archive must be exact.
 Before pushing a changed diagram, list the Doc's open comments with `gws` and
 handle any about that diagram first. Re-rendering deletes and reinserts the image,
 so a comment placed only on the diagram loses its anchor (the thread stays open).
-Comments on text, or spanning text and the diagram, keep theirs.
+Comments on text keep theirs; a comment spanning text and the diagram keeps its
+anchor, but the anchor shrinks to the text part.
 
 - **Change:** edit the Mermaid block, commit the Markdown, `baton gdoc push PATH`.
 - **Add:** put a paragraph `baton-gdoc-diagram-NAME` in the Doc where the diagram
@@ -121,8 +122,9 @@ the text just before it. Take IDs from that list.
 | Markdown or Doc changed during the pull | Pull again |
 | Image not in the Doc; pull first | Pull, then push |
 | Fetch failed, or checkout behind origin | Retry when the remote is reachable; a checkout that cannot fast-forward needs the user |
+| Push: the Doc changed while the push ran | Someone edited or commented on the Doc meanwhile; nothing was written. Push again |
 | Push: update may still have been applied | For each listed new image, set the block's mark to `image=ID` without `sha256`, commit; the next push re-renders it. If none is listed, push again |
-| Push: the Doc was updated, commit failed | The file holds the new marks; commit it with `baton artifacts commit` |
+| Push: the Doc was updated, commit failed | The file holds the new marks; fix the cause shown, then run the printed `baton artifacts commit` command |
 | Several tabs | Not supported; use a single-tab Doc |
 | Already linked | Unlink first, or use the existing link |
 
