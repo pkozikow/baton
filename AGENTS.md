@@ -1,5 +1,7 @@
 # Project management framework
 
+Make every change to this repository on a separate branch and always open a pull request. Do not push changes directly to `main`. Before merging, follow the [Baton workflow approval rule](agent-skills/baton-workflow/SKILL.md).
+
 Keep this framework generic: no company, repository, username, checkout, or personal workflow assumptions. Resolve configured paths and metadata from `baton status --json` rather than reconstructing them. Support only the current Baton names, registry layout, project manifest format, and SQLite schema. Keep ad-hoc repairs and migrations outside this repository. Keep unrelated integrations outside the core, and avoid runtime dependencies when the standard library suffices.
 
 Search existing helpers before adding one. Run tests targeted to the changed modules or behavior locally, expanding to adjacent modules when shared helpers change. Leave routine full-suite runs to CI. Run the full suite locally for major or cross-cutting changes, test harness or broad shared-fixture changes, explicit user requests, or diagnosis that requires it. A commit or task completion alone does not require a local full run. Report which checks ran and any CI results still pending. Put generated output in ignored `experiments/` directories. Preserve managed-worktree and shared-artifact safety rules; never switch primary checkouts or rewrite their history.
