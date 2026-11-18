@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- `baton gdoc` links a Markdown artifact to a Google Doc, which then owns its
+  text. `link PATH DOC_URL` adopts an existing Doc and `link PATH` creates one;
+  `pull` exports linked Docs into their Markdown files and commits them, one
+  commit per changed file; `push` renders pending or changed Mermaid blocks into
+  the Doc as images; `unlink` forgets a link. Marks before each Mermaid fence
+  record which image in the Doc each block is, so pull restores the source.
+  Links are stored in `gdoc-links.json` in the artifact directory and listed by
+  `baton status --json` as `gdoc_links`. It needs the `gws` CLI and, to render
+  diagrams, `mmdc` (`GWS_BIN` and `MMDC_BIN` override them); Baton without them
+  is unchanged. The new explicitly invoked `baton-gdoc` skill covers the
+  workflow, and the workflow startup reference points to it. See
+  [Google Doc archives](docs/gdoc.md).
 - Model tiers carry a reasoning effort. `baton config set --model-tier-effort
   PROVIDER.TIER=EFFORT` saves one in `model_tier_effort` (`--remove-model-tier-effort
   PROVIDER[.TIER]` removes it), and a tier without one resolves to `high`. Changes

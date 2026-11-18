@@ -110,6 +110,11 @@ selectors are accepted. When the artifact checkout has an `origin` remote, the
 command syncs with it and pushes the commit; `--no-push` commits locally only. Shared blackboard files are ignored coordination state; use
 `baton blackboard` commands and never commit them.
 
+A Markdown artifact can be linked to a Google Doc with `baton gdoc link`; the Doc
+then owns its text and `baton gdoc pull` commits it back as an archive.
+`baton status --json` lists such links as `gdoc_links`. See
+[Google Doc archives](gdoc.md).
+
 ## Branches and coordinator links
 
 New projects use `<branch-prefix>/<project>` branches (see

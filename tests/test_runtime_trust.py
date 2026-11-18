@@ -142,6 +142,11 @@ class RuntimeTrustTest(unittest.TestCase):
             ("baton.cli", ("artifacts", "commit", "-m", "test", str(self.home / "plan.md"))),
             ("baton.cli", ("session", "fork")),
             ("baton.cli", ("open-plan",)),
+            ("baton.cli", ("gdoc", "link", str(self.home / "plan.md"))),
+            ("baton.cli", ("gdoc", "pull")),
+            ("baton.cli", ("gdoc", "push", str(self.home / "plan.md"))),
+            ("baton.cli", ("gdoc", "unlink", str(self.home / "plan.md"))),
+            ("baton.gdoc", ("pull", "--no-push")),
         )
         for module, args in commands:
             with self.subTest(module=module, args=args):
@@ -156,6 +161,9 @@ class RuntimeTrustTest(unittest.TestCase):
                              ("baton.cli", ("status", "--json")), ("baton.cli", ("cleanup", "--dry-run")),
                              ("baton.cli", ("retro", "pending", "--dry-run")),
                              ("baton.cli", ("retro", "summarize", "--dry-run", "--json")),
+                             ("baton.cli", ("gdoc", "--help")),
+                             ("baton.cli", ("gdoc", "pull", "--dry-run")),
+                             ("baton.cli", ("gdoc", "push", str(self.home / "plan.md"), "--dry-run")),
                              ("baton.retro_cron", ("run-weekly", "--dry-run", "--json"))):
             with self.subTest(module=module, args=args):
                 result = self.cli(*args, module=module)

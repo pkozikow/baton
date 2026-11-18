@@ -1,0 +1,7 @@
+interface:
+  display_name: "Baton Google Doc Archives"
+  short_description: "Link artifacts to Google Docs, pull them into Git and push diagrams"
+  default_prompt: "Use $baton-gdoc to pull the project's linked Google Docs into their Markdown archives."
+
+policy:
+  allow_implicit_invocation: false

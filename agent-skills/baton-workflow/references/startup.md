@@ -71,6 +71,8 @@ Never put generated output in slots.
 
 Authoritative project artifacts deliberately use the configured shared primary artifact checkout: this overrides the ordinary temporary-worktree rule for those artifact files only, including scoped validation artifacts. Commit with `baton artifacts commit [--selector <project>] -m <message> <absolute-path>...`; relative paths resolve against cwd. Workers commit only their own subplans; the parent owns the master, and multi-branch checkout scoping rejects other branches' subplans. The helper commits, fast-forwards and pushes only project artifacts inside the configured artifact area (`--no-push` commits locally); `baton rename` preserves the artifact directory. Report the specific publication outcome: network failures leave local commits for retry, while actual divergence needs user reconciliation. Never rebase, merge, or reset the shared artifact checkout. This exception grants no permission to edit other files in a primary checkout.
 
+Artifacts that status lists under `gdoc_links` are archives of a Google Doc, which is the source of truth for their text. Read [baton-gdoc](../../baton-gdoc/SKILL.md) before relying on or changing one.
+
 
 ## Create a follow-up from historical work
 

@@ -38,6 +38,7 @@ packages = ["baton"]
 "agent-skills/baton-review-executor" = "baton/skills/baton-review-executor"
 "agent-skills/baton-review-loop" = "baton/skills/baton-review-loop"
 "agent-skills/baton-retro" = "baton/skills/baton-retro"
+"agent-skills/baton-gdoc" = "baton/skills/baton-gdoc"
 
 "agent-skills/baton-workflow" = "baton/skills/baton-workflow"
 

@@ -24,7 +24,8 @@ WORKFLOW = "baton-workflow"
 SLOTS_ROOT_PLACEHOLDER = "{{BATON_SLOTS_ROOT}}"
 # Today's targets stay installed even when their harness is absent.
 FLOOR = (".agents/skills", ".claude/skills")
-SKILLS = ("baton-plan", "baton-peer-review", "baton-review-executor", "baton-review-loop", "baton-retro", WORKFLOW)
+SKILLS = ("baton-plan", "baton-peer-review", "baton-review-executor", "baton-review-loop", "baton-retro",
+          "baton-gdoc", WORKFLOW)
 # Skills earlier releases installed; a reinstall removes their links when they still point where the manifest says.
 RETIRED_SKILLS = ("baton-plan-review-executor", "baton-peer-review-executor")
 
