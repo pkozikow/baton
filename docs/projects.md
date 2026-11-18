@@ -72,6 +72,15 @@ project. Use `baton path --selector PROJECT [REPO] [--member NAME]` for its regi
 paths: with `--selector`, a single positional argument is the repository. The old
 `baton path [PROJECT] [REPO] [--member NAME]` form remains accepted.
 
+Use `baton path --artifacts` for the current project's artifact directory, or
+`baton path --selector PROJECT --artifacts` from anywhere. The positional form
+`baton path PROJECT --artifacts` is also accepted; in artifacts mode the positional
+argument is strictly a project selector, without repository-name fallback.
+`--artifacts` cannot be combined with a repository argument or `--member`.
+Archived projects are selectable by full UUID or an unambiguous name; an active
+name takes precedence, and slots select only their current occupants. The command
+prints the recorded absolute `artifacts_path`, which stays stable through renames.
+
 Creation instead selects a target slot: `baton create NAME --selector p1 --repos REPO...`
 works from anywhere. Only `p1` through `p10` are accepted here; omitting
 `--selector` still uses the current coordinator slot. This also applies to
