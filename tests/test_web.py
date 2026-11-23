@@ -2,7 +2,7 @@ import hashlib
 import http.client
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import shutil
 import signal
 import socket
@@ -14,6 +14,7 @@ import unittest
 from typing import Any
 from unittest.mock import patch
 
+from baton.artifacts import NonRegularArtifact, read_artifact
 from baton.web import prs, server
 import test_project_manager as fixtures
 
@@ -226,12 +227,22 @@ class WebTest(unittest.TestCase):
         for name, content in malformed.items():
             (reviews / name).mkdir()
             (reviews / name / "run.json").write_text(content)
+        directory_record = "20261123T200008Z-plan-directory"
+        (reviews / directory_record / "run.json").mkdir(parents=True)
         self.serve()
         code, _headers, body = self.request(f"/project/{self.uuid}/reviews", timeout=10)
         self.assertEqual(code, 200, body)
         self.assertIn(good, body)
-        for skipped in (linked_dir, linked_record, fifo, *malformed, "20261123T200000Z-plan-other"):
+        for skipped in (linked_dir, linked_record, fifo, *malformed, directory_record, "20261123T200000Z-plan-other"):
             self.assertNotIn(skipped, body)
+
+    def test_read_artifact_closes_the_descriptor_of_a_non_regular_target(self) -> None:
+        (self.directory / "nested").mkdir()
+        before = len(os.listdir("/dev/fd"))
+        for _ in range(20):
+            with self.assertRaises(NonRegularArtifact):
+                read_artifact(self.directory, PurePosixPath("nested"))
+        self.assertEqual(len(os.listdir("/dev/fd")), before)
 
     def test_file_views_and_containment(self) -> None:
         (self.directory / "plan.md").write_text("# Plan\n\n<script>alert(1)</script> [x](javascript:alert(1))\n")

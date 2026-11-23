@@ -86,6 +86,9 @@ The UI is meant for the local user only and has no authentication.
 - No live updates or auto-refresh, no actions (claim, post, cleanup, launch).
 - Code worktrees, provider transcripts, unsaved worktree notes, sealed board
   databases and the output files of unsaved review runs are not browsable.
+- Relative links work between artifact files. A relative link inside a board
+  post or the board overview resolves against the board page and does not
+  reach the artifact.
 
 ## Vendored browser libraries
 

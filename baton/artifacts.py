@@ -47,9 +47,15 @@ def open_artifact(root: Path, relative: PurePosixPath) -> int:
 def read_artifact(root: Path, relative: PurePosixPath, limit: int | None = None) -> bytes:
     """A regular file's bytes, read through open_artifact; with a limit, at most limit + 1 bytes."""
     descriptor = open_artifact(root, relative)
-    with os.fdopen(descriptor, "rb") as stream:
+    try:
+        # fdopen() refuses a directory without closing the descriptor it was given.
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             raise NonRegularArtifact(f"Not a regular file: {root / relative}")
+        stream = os.fdopen(descriptor, "rb")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    with stream:
         return stream.read() if limit is None else stream.read(limit + 1)
 
 
