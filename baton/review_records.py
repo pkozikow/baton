@@ -214,16 +214,21 @@ def save(run_dir: Path, selector: str | None) -> int:
     return 0
 
 
-def list_runs(selector: str | None, as_json: bool) -> int:
-    manager, project = _project(selector)
+def run_rows(manager: Any, project: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Summary rows of the project's saved and unsaved runs (every unsaved run without a project), oldest first."""
     saved = _saved(_saved_root(manager, project))
     saved_ids = {record["id"] for _directory, record in saved}
     runs = [(directory, record, True) for directory, record in saved]
     runs += [(directory, record, False) for directory, record in _unsaved(project) if record["id"] not in saved_ids]
     runs.sort(key=lambda run: str(run[1].get("started")))
-    rows = [{"id": record["id"], "kind": record.get("kind"), "focus": record.get("focus"),
+    return [{"id": record["id"], "kind": record.get("kind"), "focus": record.get("focus"),
              "started": record.get("started"), "coverage": coverage(record), "status": effective_status(record),
              "saved": is_saved, "path": str(directory)} for directory, record, is_saved in runs]
+
+
+def list_runs(selector: str | None, as_json: bool) -> int:
+    manager, project = _project(selector)
+    rows = run_rows(manager, project)
     if as_json:
         print(json.dumps(rows, indent=2))
         return 0

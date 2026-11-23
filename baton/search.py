@@ -1,14 +1,13 @@
 """Read-only discovery over registered metadata and saved project evidence."""
 
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
-import stat
 from typing import Any, Iterator
 
 from .core import ManagerCore
-from .artifacts import unsafe_artifact_path
+from .artifacts import NonRegularArtifact, read_artifact, unsafe_artifact_path
 from .errors import ProjectError
 from .providers import get_provider
 
@@ -184,12 +183,13 @@ class SearchMixin(ManagerCore):
             elif project_id not in conflicting:
                 for path in _sources(directory, categories, warnings):
                     try:
-                        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
-                        with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
-                            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
-                                warnings.append(f"Skipped nonregular artifact: {path}")
-                                continue
-                            text = stream.read()
+                        try:
+                            data = read_artifact(directory, PurePosixPath(path.relative_to(directory).as_posix()))
+                        except NonRegularArtifact:
+                            warnings.append(f"Skipped nonregular artifact: {path}")
+                            continue
+                        # Universal newlines, as text-mode reads gave, keep reported line numbers stable.
+                        text = data.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
                         hit, evidence = _evidence(text, terms, str(path), artifact=True, include_excerpt=len(matches) < 12)
                         found |= hit
                         if hit:

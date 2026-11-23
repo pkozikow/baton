@@ -162,6 +162,7 @@ class RuntimeTrustTest(unittest.TestCase):
                              ("baton.cli", ("retro", "pending", "--dry-run")),
                              ("baton.cli", ("retro", "summarize", "--dry-run", "--json")),
                              ("baton.cli", ("gdoc", "--help")),
+                             ("baton.cli", ("web", "--help")),
                              ("baton.cli", ("gdoc", "pull", "--dry-run")),
                              ("baton.cli", ("gdoc", "push", str(self.home / "plan.md"), "--dry-run")),
                              ("baton.retro_cron", ("run-weekly", "--dry-run", "--json"))):

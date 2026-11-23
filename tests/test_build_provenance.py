@@ -60,6 +60,14 @@ class BuildProvenanceTest(unittest.TestCase):
                     self.assertEqual(archive.read(packaged), resource.read_bytes())
             self.assertIn('baton/_build_info.json', names)
             self.assertIn('blackboard.py', names)
+            web = source / 'baton/web/static'
+            for resource in web.rglob('*'):
+                if resource.is_file():
+                    packaged = f'baton/web/static/{resource.relative_to(web).as_posix()}'
+                    self.assertEqual(archive.read(packaged), resource.read_bytes())
+            licenses = {name.split('.dist-info/licenses/', 1)[1] for name in names if '.dist-info/licenses/' in name}
+            self.assertTrue({'LICENSE', 'THIRD_PARTY_NOTICES.md', 'baton/web/static/vendor/markdown-it.LICENSE.txt',
+                             'baton/web/static/vendor/mermaid.LICENSE.txt'} <= licenses, licenses)
             entrypoints = configparser.ConfigParser()
             entrypoints.read_string(archive.read(next(
                 name for name in names if name.endswith('.dist-info/entry_points.txt'))).decode())
@@ -96,6 +104,11 @@ class BuildProvenanceTest(unittest.TestCase):
         source = Path(__file__).resolve().parents[1]
         distribution = Path(next(SdistBuilder(str(source)).build(directory=str(self.root))))
         with tarfile.open(distribution) as archive:
+            names = {member.name.split('/', 1)[1] for member in archive.getmembers()}
+            self.assertIn('THIRD_PARTY_NOTICES.md', names)
+            for resource in ('VENDORED.json', 'markdown-it.umd.min.js', 'markdown-it.LICENSE.txt',
+                             'mermaid.min.js', 'mermaid.LICENSE.txt'):
+                self.assertIn(f'baton/web/static/vendor/{resource}', names)
             for name in ('performance', 'complexity', 'security'):
                 suffix = f'/baton/review_focuses/{name}.md'
                 member = next(member for member in archive.getmembers() if member.name.endswith(suffix))
