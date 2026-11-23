@@ -6,7 +6,6 @@ Every page escapes the values it shows with html.escape. Markdown travels escape
 
 from dataclasses import dataclass
 import html
-import json
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -21,7 +20,7 @@ from ..artifacts import open_artifact, read_artifact, unsafe_artifact_path
 from ..blackboard_sqlite import entry_text
 from ..errors import ProjectError
 from ..manifest import entries, entry_stack_root, member_name, subplan_directory
-from ..review_records import RECORD, RUN_ID, run_rows
+from ..review_records import RECORD, run_rows, saved_runs_safely, unsaved_runs
 from ..slots import SLOT_NAMES
 from . import prs
 
@@ -29,7 +28,9 @@ UUID = re.compile(r"[0-9a-f]{32}")
 TEXT_LIMIT = 2 * 1024 * 1024
 BOARD_TAIL = 50
 SEARCH_LIMIT = 50
-MERMAID_FENCE = re.compile(r"^[ \t]{0,3}(?:`{3,}|~{3,})[ \t]*mermaid(?:[ \t]|$)", re.MULTILINE)
+# Broader than markdown-it on purpose (any indentation, list markers, blockquotes, CRLF): over-matching only
+# relaxes style-src on that page, while missing a fence would leave its diagram as code.
+MERMAID_FENCE = re.compile(r"^(?:[ \t>]|[-*+][ \t]|\d+[.)][ \t])*(?:`{3,}|~{3,})[ \t]*mermaid(?:[ \t\r]|$)", re.MULTILINE)
 SQLITE_MAGIC = b"SQLite format 3\x00"
 # Hidden entries, live board files and SQLite databases with their sidecars are never listed or served.
 HIDDEN_NAMES = re.compile(r"^(?:\..*|blackboard-lock\.md|blackboard\.sqlite.*|.+\.(?:sqlite3?|db)(?:-(?:wal|shm|journal))?)$",
@@ -177,7 +178,7 @@ def artifact_root(manager: Any, project: dict[str, Any]) -> Path | None:
     return None if unsafe_artifact_path(directory) or not directory.is_dir() else directory
 
 
-def artifact_links(manager: Any, project: dict[str, Any], directory: Path | None) -> str:
+def artifact_links(project: dict[str, Any], directory: Path | None) -> str:
     if directory is None:
         return '<p class="muted">The artifact directory is unavailable.</p>'
     candidates: list[tuple[str, PurePosixPath]] = [("Plan", PurePosixPath("plan.md"))]
@@ -262,24 +263,21 @@ def project_page(manager: Any, project: dict[str, Any]) -> Page:
     sections.append("<dl>" + "".join(f"<dt>{e(label)}</dt><dd>{value}</dd>" for label, value in identity) + "</dl>")
     if error is not None:
         sections.append(f'<p class="error">Status unavailable: {e(error)}. Showing the registry record.</p>')
+    recorded, retired = recorded_entries(project)
     if data is not None:
         rows = [[e(entry["repo"]), e(entry["member"] or "root"), f"<code>{e(entry['branch'])}</code>",
                  e("native stack" if entry["workflow"] == "native_stack" else "independent"),
                  e(entry["pr_base"]) + ("" if entry["base_reliable"] else ' <span class="error">(unreliable)</span>'),
                  e(entry["step"]), e({True: "needs rebase", False: "", None: "unknown"}[entry["needs_rebase"]])]
                 for entry in data["entries"]]
-        retired = [[e(entry["repo"]), e(entry["member"] or "root"), f"<code>{e(entry['branch'])}</code>",
-                    e(entry["retirement_state"]), f"<code>{e(entry.get('backup_ref') or '')}</code>"]
-                   for entry in data["retired_entries"]]
         sections.append("<h2>Branches</h2>" + table(("Repository", "Member", "Branch", "Workflow", "PR base", "Step", "Rebase"), rows))
         if data["errors"]:
             sections.append("<ul class=\"error\">" + "".join(f"<li>{e(item)}</li>" for item in data["errors"]) + "</ul>")
     else:
-        rows, retired = recorded_entries(project)
-        sections.append("<h2>Branches</h2>" + table(("Repository", "Member", "Branch", "Workflow", "Step", "Retirement"), rows))
+        sections.append("<h2>Branches</h2>" + table(("Repository", "Member", "Branch", "Workflow", "Step", "Retirement"), recorded))
     if retired:
         sections.append("<h2>Retired members</h2>" + table(("Repository", "Member", "Branch", "Retirement", "Archive ref"), retired))
-    sections.append("<h2>Artifacts</h2>" + artifact_links(manager, project, directory))
+    sections.append("<h2>Artifacts</h2>" + artifact_links(project, directory))
     prs_url = project_url(uuid, "/prs")
     sections.append(f'<h2>Pull requests</h2><div data-pull-requests="{e(prs_url)}?fragment=1">'
                     f'{link(prs_url, "Look up pull requests")}</div>')
@@ -337,18 +335,11 @@ def board_page(manager: Any, project: dict[str, Any]) -> Page:
     return Page(f"{project['name']} board", body, mermaid=any(map(has_mermaid, texts)))
 
 
-def reviewer_links(directory: Path | None, project: dict[str, Any], run_id: str) -> str:
-    if directory is None or not RUN_ID.fullmatch(run_id):
-        return ""
-    relative = PurePosixPath("reviews", run_id)
-    try:
-        record = json.loads(read_artifact(directory, relative / RECORD))
-    except (OSError, ValueError):
-        return '<span class="muted">record unreadable</span>'
+def reviewer_links(directory: Path, project: dict[str, Any], record: dict[str, Any]) -> str:
+    """Links to a saved run's record and each reviewer's saved output, by basename within the run's directory."""
+    relative = PurePosixPath("reviews", record["id"])
     items = [link(file_url(project["uuid"], relative / RECORD), "record")]
-    for reviewer in record.get("reviewers") or []:
-        if not isinstance(reviewer, dict):
-            continue
+    for reviewer in record["reviewers"]:
         label = f"{reviewer.get('provider')}: {reviewer.get('status')}"
         outputs = []
         for key in ("review", "failed_output"):
@@ -362,13 +353,15 @@ def reviewer_links(directory: Path | None, project: dict[str, Any], run_id: str)
 
 def reviews_page(manager: Any, project: dict[str, Any]) -> Page:
     directory = artifact_root(manager, project)
+    saved = [] if directory is None else saved_runs_safely(directory)
+    records = {record["id"]: record for _path, record in saved}
     rows = []
-    for row in reversed(run_rows(manager, project)):
+    for row in reversed(run_rows(saved, unsaved_runs(project))):
         kind = str(row["kind"]) + (f"/{row['focus']}" if row["focus"] else "")
-        saved = row["saved"]
+        is_saved = row["saved"]
         rows.append([f"<code>{e(row['id'])}</code>", e(kind), e(row["started"]), e(row["coverage"]), e(row["status"]),
-                     "saved" if saved else f'unsaved<br><code class="muted">{e(row["path"])}</code>',
-                     reviewer_links(directory, project, row["id"]) if saved else ""])
+                     "saved" if is_saved else f'unsaved<br><code class="muted">{e(row["path"])}</code>',
+                     reviewer_links(directory, project, records[row["id"]]) if is_saved and directory else ""])
     body = (project_nav(project, "Reviews")
             + table(("Run", "Kind", "Started", "Reviewers", "Status", "Saved", "Outputs"), rows, "No review runs found."))
     return Page(f"{project['name']} reviews", body)
@@ -426,11 +419,13 @@ def files_page(manager: Any, project: dict[str, Any], path: str) -> Page:
             return Page(title, nav + listing(project, relative, descriptor))
         if not stat.S_ISREG(mode):
             return not_found()
-        with os.fdopen(os.dup(descriptor), "rb") as stream:
-            data = stream.read(TEXT_LIMIT + 1)
         size = os.fstat(descriptor).st_size
     finally:
         os.close(descriptor)
+    try:
+        data = read_artifact(directory, relative, limit=TEXT_LIMIT)
+    except (OSError, ValueError):
+        return not_found()
     if data.startswith(SQLITE_MAGIC):
         return not_found()
     head = nav + crumbs(project, relative)
@@ -458,8 +453,6 @@ def search_form(query: str, state: str) -> str:
 
 def search_page(manager: Any, query: str, state: str) -> Page:
     form = "<h1>Search</h1>" + search_form(query, state if state in ("all", "active", "archived") else "all")
-    if not query.strip():
-        return Page("Search", form + '<p class="error">Enter a keyword or a quoted phrase.</p>', status=400)
     try:
         result = manager.search_projects(query, state=state, limit=SEARCH_LIMIT)
     except ProjectError as error:
@@ -493,13 +486,10 @@ def search_page(manager: Any, query: str, state: str) -> Page:
 def pull_requests_page(project: dict[str, Any], fragment: bool) -> Page:
     rows = []
     for pulls in prs.lookup(project):
-        if pulls.unavailable is not None and not pulls.branches:
-            rows.append([e(pulls.repo), "", f'<span class="muted">unavailable ({e(pulls.unavailable)})</span>', "", ""])
-            continue
         for branch, found in pulls.branches.items():
             if not found:
                 rows.append([e(pulls.repo), f"<code>{e(branch)}</code>", '<span class="muted">no pull request</span>', "", ""])
-            for pr in found or []:
+            for pr in found:
                 url = pr["url"]
                 number = link(url, f"#{pr['number']}") if url.startswith("https://") else e(f"#{pr['number']}")
                 rows.append([e(pulls.repo), f"<code>{e(branch)}</code>", number, e(pr["title"]), e(pr["state"].lower())])

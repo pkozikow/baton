@@ -64,7 +64,14 @@
   async function renderDiagrams() {
     const url = document.body.dataset.mermaid;
     const blocks = Array.from(document.querySelectorAll('.markdown pre > code.language-mermaid'));
-    if (!url || blocks.length === 0) {
+    if (blocks.length === 0) {
+      return;
+    }
+    if (!url) {
+      // The server marks pages with diagrams; a block it missed must not look like plain code.
+      for (const code of blocks) {
+        showDiagramError(code.parentElement, new Error('this page was not prepared for diagrams'));
+      }
       return;
     }
     try {

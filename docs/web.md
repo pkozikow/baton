@@ -64,8 +64,9 @@ not subject to [runtime write protection](installation.md#runtime-write-protecti
 The UI is meant for the local user only and has no authentication.
 
 - Requests whose `Host` header is not `127.0.0.1:PORT` are refused, which stops
-  DNS rebinding, and so are requests marked `Sec-Fetch-Site: cross-site`. No CORS
-  headers are sent.
+  DNS rebinding. When a browser sends `Sec-Fetch-Site`, only `same-origin` and
+  `none` (typed or bookmarked URLs) are accepted, so pages on other sites or other
+  local ports cannot make the UI run lookups. No CORS headers are sent.
 - Every response carries a restrictive Content Security Policy: scripts, styles,
   images and connections only from the server itself, no inline scripts, no
   framing. Pages that contain Mermaid diagrams also allow inline styles, which

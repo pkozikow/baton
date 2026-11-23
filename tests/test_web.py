@@ -14,7 +14,7 @@ import unittest
 from typing import Any
 from unittest.mock import patch
 
-from baton.web import server
+from baton.web import prs, server
 import test_project_manager as fixtures
 
 VENDOR = Path(server.__file__).resolve().parent / "static" / "vendor"
@@ -62,9 +62,9 @@ class WebTest(unittest.TestCase):
         self.addCleanup(httpd.shutdown)
         self.port = httpd.server_port
 
-    def request(self, path: str, *, method: str = "GET",
-                headers: dict[str, str] | None = None) -> tuple[int, http.client.HTTPMessage, str]:
-        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=60)
+    def request(self, path: str, *, method: str = "GET", headers: dict[str, str] | None = None,
+                timeout: float = 60) -> tuple[int, http.client.HTTPMessage, str]:
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
         try:
             connection.request(method, path, headers=headers or {})
             response = connection.getresponse()
@@ -197,6 +197,42 @@ class WebTest(unittest.TestCase):
         self.assertNotIn("codex.md.failed", body)
         self.assertIn("Looks good.", self.page(review))
 
+    def test_reviews_skip_unsafe_or_malformed_saved_runs(self) -> None:
+        reviews = self.directory / "reviews"
+        reviews.mkdir()
+        outside = self.root / "outside-run"
+        outside.mkdir()
+
+        def record(run_id: str, **extra: Any) -> str:
+            return json.dumps({"id": run_id, "kind": "plan", "status": "succeeded", "started": "2026-11-23T20:00:00+00:00",
+                               "reviewers": [{"provider": "claude", "status": "succeeded"}], **extra})
+
+        good = "20261123T200000Z-plan-good"
+        (reviews / good).mkdir()
+        (reviews / good / "run.json").write_text(record(good))
+        linked_dir = "20261123T200001Z-plan-linkeddir"
+        (outside / "run.json").write_text(record(linked_dir))
+        (reviews / linked_dir).symlink_to(outside)
+        linked_record = "20261123T200002Z-plan-linkedrecord"
+        (reviews / linked_record).mkdir()
+        (outside / "record.json").write_text(record(linked_record))
+        (reviews / linked_record / "run.json").symlink_to(outside / "record.json")
+        fifo = "20261123T200003Z-plan-fifo"
+        (reviews / fifo).mkdir()
+        os.mkfifo(reviews / fifo / "run.json")
+        malformed = {"20261123T200004Z-plan-notjson": "{", "20261123T200005Z-plan-list": "[]",
+                     "20261123T200006Z-plan-reviewer": record("20261123T200006Z-plan-reviewer", reviewers=["claude"]),
+                     "20261123T200007Z-plan-renamed": record("20261123T200000Z-plan-other")}
+        for name, content in malformed.items():
+            (reviews / name).mkdir()
+            (reviews / name / "run.json").write_text(content)
+        self.serve()
+        code, _headers, body = self.request(f"/project/{self.uuid}/reviews", timeout=10)
+        self.assertEqual(code, 200, body)
+        self.assertIn(good, body)
+        for skipped in (linked_dir, linked_record, fifo, *malformed, "20261123T200000Z-plan-other"):
+            self.assertNotIn(skipped, body)
+
     def test_file_views_and_containment(self) -> None:
         (self.directory / "plan.md").write_text("# Plan\n\n<script>alert(1)</script> [x](javascript:alert(1))\n")
         (self.directory / "notes.txt").write_text("plain <text>\n")
@@ -285,8 +321,9 @@ class WebTest(unittest.TestCase):
         for host in ("evil.example", f"evil.example:{self.port}", f"localhost.evil.example:{self.port}", "127.0.0.1"):
             with self.subTest(host=host):
                 self.assertEqual(self.request("/", headers={"Host": host})[0], 403)
-        self.assertEqual(self.request("/", headers={"Sec-Fetch-Site": "cross-site"})[0], 403)
-        self.assertEqual(self.request("/", headers={"Sec-Fetch-Site": "same-origin"})[0], 200)
+        for site, expected in (("cross-site", 403), ("same-site", 403), ("same-origin", 200), ("none", 200)):
+            with self.subTest(site=site):
+                self.assertEqual(self.request("/", headers={"Sec-Fetch-Site": site})[0], expected)
         code, headers, body = self.request("/", method="HEAD")
         self.assertEqual((code, body), (200, ""))
         for path in ("/", "/static/app.js", "/missing", f"/project/{self.uuid}"):
@@ -312,6 +349,40 @@ class WebTest(unittest.TestCase):
         code, headers, body = self.request(f"/project/{self.uuid}/files/retro.md")
         self.assertNotIn("mermaid.min.js", body)
         self.assertEqual(headers["Content-Security-Policy"], STRICT_CSP)
+        fences = {"crlf.md": "# CRLF\r\n\r\n```mermaid\r\ngraph TD; A-->B\r\n```\r\n",
+                  "list.md": "- Step\n\n    ```mermaid\n    graph TD; A-->B\n    ```\n",
+                  "quote.md": "> Quoted\n>\n> ~~~ mermaid\n> graph TD; A-->B\n> ~~~\n"}
+        for name, text in fences.items():
+            with self.subTest(name=name):
+                (self.directory / name).write_bytes(text.encode())
+                self.assertIn('data-mermaid="/static/vendor/mermaid.min.js"', self.page(f"/project/{self.uuid}/files/{name}"))
+
+    def test_request_manager_reads_the_archive_once(self) -> None:
+        self.archive("finished", "e" * 32, "2026-03-01T00:00:00+00:00", 1)
+        self.serve()
+        manager = server.RequestManager()
+        manager.load()
+        self.assertEqual(manager.artifact_project("e" * 32)["name"], "finished")
+        for path in (self.projects / ".git" / "baton" / "v2" / "archive").glob("*.json"):
+            path.unlink()
+        self.assertEqual([project["name"] for project in manager.archived_projects()], ["finished"])
+        self.assertEqual(manager.state_dir, manager.state_dir)
+        self.assertEqual(server.Manager().layout, manager.layout)
+
+    def test_pull_request_lookup_respects_the_total_budget(self) -> None:
+        tools = self.root / "slow-git"
+        tools.mkdir()
+        real_git = shutil.which("git") or "/usr/bin/git"
+        (tools / "git").write_text(f'#!/bin/sh\ncase "$*" in *remote.origin.url*) sleep 30;; esac\nexec {real_git} "$@"\n')
+        (tools / "git").chmod(0o755)
+        project = {"repos": [{"id": "first", "source": str(self.repos / "alpha"), "branch": "baton/example"},
+                             {"id": "second", "source": str(self.repos / "alpha"), "branch": "baton/example"}]}
+        with patch.dict(os.environ, {"PATH": f"{tools}{os.pathsep}{os.environ['PATH']}"}):
+            started = time.monotonic()
+            result = prs.lookup(project, call_timeout=0.5, total_budget=0.5)
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual([(pulls.repo, pulls.unavailable) for pulls in result],
+                         [("first", "lookup failed"), ("second", "lookup time budget exhausted")])
 
     def test_uninitialized_registry_is_never_created_or_repaired(self) -> None:
         registry = self.projects / ".git" / "baton"

@@ -1,6 +1,7 @@
 """`baton web`: a local, read-only web UI over project status and saved artifacts."""
 
 import argparse
+from functools import cached_property
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -8,11 +9,12 @@ import signal
 import sys
 import traceback
 from types import FrameType
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 from urllib.parse import parse_qs, unquote
 import webbrowser
 
 from ..errors import ProjectError
+from ..manager import Manager
 from . import prs, views
 
 HOST = "127.0.0.1"
@@ -60,17 +62,34 @@ def layout(page: views.Page) -> str:
             "<a href=\"/static/vendor/mermaid.LICENSE.txt\">Mermaid</a></footer></body></html>\n")
 
 
+class RequestManager(Manager):
+    """A manager for one request: the registry location and archive listing are read once, not per lookup."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._archived: list[dict[str, Any]] | None = None
+
+    @cached_property
+    def state_dir(self) -> Path:  # type: ignore[override]
+        return super().state_dir
+
+    def archived_projects(self) -> Iterator[dict[str, Any]]:
+        if self._archived is None:
+            self._archived = list(super().archived_projects())
+        return iter(self._archived)
+
+
 def route(path: str, query: dict[str, list[str]]) -> views.Page:
     """Render a decoded request path that is not a static file."""
-    from ..manager import Manager
-    manager = Manager()
+    manager = RequestManager()
     if not views.registry_ready(manager):
         return views.not_initialized()
+    if path == "/search":
+        # search_projects loads the registry itself.
+        return views.search_page(manager, (query.get("q") or [""])[0], (query.get("state") or ["all"])[0])
     manager.load()
     if path == "/":
         return views.overview(manager)
-    if path == "/search":
-        return views.search_page(manager, (query.get("q") or [""])[0], (query.get("state") or ["all"])[0])
     parts = path.split("/", 4)
     if len(parts) < 3 or parts[1] != "project":
         return views.not_found()
@@ -151,8 +170,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get("Host") != f"{HOST}:{self.server.server_port}":
             self.send(403, b"Forbidden host.\n", "text/plain; charset=utf-8", head=head)
             return
-        if self.headers.get("Sec-Fetch-Site") == "cross-site":
-            self.send(403, b"Cross-site requests are refused.\n", "text/plain; charset=utf-8", head=head)
+        # same-site would admit pages served from other loopback ports.
+        if self.headers.get("Sec-Fetch-Site", "none") not in ("same-origin", "none"):
+            self.send(403, b"Requests from other origins are refused.\n", "text/plain; charset=utf-8", head=head)
             return
         raw, _, query = self.path.partition("?")
         try:

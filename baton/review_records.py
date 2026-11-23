@@ -9,18 +9,20 @@ a run directory: it copies a finished record and its review files into the proje
 import filecmp
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
 import stat
 import sys
 from typing import Any
 
+from .artifacts import open_artifact, read_artifact, unsafe_artifact_path
 from .errors import NoProject, ProjectError
 from .gitutil import git, write_json
 from .providers import process_start
 
 RECORD = "run.json"
+RECORD_LIMIT = 1024 * 1024
 RUN_ID = re.compile(r"\d{8}T\d{6}Z-(plan|implementation)-[a-z0-9_]+")
 RUN_DIRECTORY_KINDS = ("plan-review", "peer-review")
 REVIEW_SUFFIXES = (".md", ".md.failed", ".md.invalid")
@@ -72,13 +74,17 @@ def write_record(run_dir: Path, record: dict[str, Any]) -> None:
     write_json(run_dir / RECORD, record)
 
 
-def read_record(path: Path) -> dict[str, Any]:
-    record = json.loads(path.read_text())
+def validate_record(record: Any, source: Path) -> dict[str, Any]:
     # The ID names the saved copy's directory, so only the runner's own format is accepted.
     if (not isinstance(record, dict) or not isinstance(record.get("id"), str)
-            or not RUN_ID.fullmatch(record["id"]) or not isinstance(record.get("reviewers"), list)):
-        raise ValueError(f"Not a review run record: {path}")
+            or not RUN_ID.fullmatch(record["id"]) or not isinstance(record.get("reviewers"), list)
+            or not all(isinstance(reviewer, dict) for reviewer in record["reviewers"])):
+        raise ValueError(f"Not a review run record: {source}")
     return record
+
+
+def read_record(path: Path) -> dict[str, Any]:
+    return validate_record(json.loads(path.read_text()), path)
 
 
 def coverage(record: dict[str, Any]) -> str:
@@ -123,7 +129,7 @@ def _own_directory(path: Path) -> bool:
     return stat.S_ISDIR(details.st_mode) and details.st_uid == os.getuid()
 
 
-def _unsaved(project: dict[str, Any] | None) -> list[tuple[Path, dict[str, Any]]]:
+def unsaved_runs(project: dict[str, Any] | None) -> list[tuple[Path, dict[str, Any]]]:
     root = temporary_root()
     # Another local user can create directories in a shared temporary root; only the caller's own runs count.
     directories = sorted(path for kind in RUN_DIRECTORY_KINDS for path in root.glob(f"{kind}.*") if _own_directory(path))
@@ -135,6 +141,37 @@ def _saved(saved_root: Path | None) -> list[tuple[Path, dict[str, Any]]]:
     if saved_root is None or not saved_root.is_dir():
         return []
     return _records(sorted(path for path in saved_root.iterdir() if path.is_dir() and not path.name.startswith(".")))
+
+
+def saved_runs_safely(directory: Path) -> list[tuple[Path, dict[str, Any]]]:
+    """Saved runs of an artifact directory, read without following a symlink at any path component."""
+    if unsafe_artifact_path(directory) or not directory.is_dir():
+        return []
+    try:
+        descriptor = open_artifact(directory, PurePosixPath("reviews"))
+    except (OSError, ValueError):
+        return []
+    try:
+        if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            return []
+        with os.scandir(descriptor) as scan:
+            names = sorted(item.name for item in scan
+                           if not item.name.startswith(".") and item.is_dir(follow_symlinks=False))
+    finally:
+        os.close(descriptor)
+    found = []
+    for name in names:
+        relative = PurePosixPath("reviews", name, RECORD)
+        try:
+            data = read_artifact(directory, relative, limit=RECORD_LIMIT)
+            if len(data) > RECORD_LIMIT:
+                continue
+            record = validate_record(json.loads(data), directory / relative)
+        except (OSError, ValueError):
+            continue
+        if record["id"] == name:
+            found.append((directory / "reviews" / name, record))
+    return found
 
 
 def save(run_dir: Path, selector: str | None) -> int:
@@ -214,12 +251,12 @@ def save(run_dir: Path, selector: str | None) -> int:
     return 0
 
 
-def run_rows(manager: Any, project: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """Summary rows of the project's saved and unsaved runs (every unsaved run without a project), oldest first."""
-    saved = _saved(_saved_root(manager, project))
+def run_rows(saved: list[tuple[Path, dict[str, Any]]],
+             unsaved: list[tuple[Path, dict[str, Any]]]) -> list[dict[str, Any]]:
+    """Summary rows of saved and unsaved runs, oldest first; a saved copy hides its unsaved original."""
     saved_ids = {record["id"] for _directory, record in saved}
     runs = [(directory, record, True) for directory, record in saved]
-    runs += [(directory, record, False) for directory, record in _unsaved(project) if record["id"] not in saved_ids]
+    runs += [(directory, record, False) for directory, record in unsaved if record["id"] not in saved_ids]
     runs.sort(key=lambda run: str(run[1].get("started")))
     return [{"id": record["id"], "kind": record.get("kind"), "focus": record.get("focus"),
              "started": record.get("started"), "coverage": coverage(record), "status": effective_status(record),
@@ -228,7 +265,7 @@ def run_rows(manager: Any, project: dict[str, Any] | None) -> list[dict[str, Any
 
 def list_runs(selector: str | None, as_json: bool) -> int:
     manager, project = _project(selector)
-    rows = run_rows(manager, project)
+    rows = run_rows(_saved(_saved_root(manager, project)), unsaved_runs(project))
     if as_json:
         print(json.dumps(rows, indent=2))
         return 0
@@ -252,7 +289,7 @@ def find_run(run: str, selector: str | None) -> tuple[Path, dict[str, Any], bool
     for directory, record in _saved(_saved_root(manager, project)):
         if record["id"] == run:
             return directory, record, True
-    for directory, record in _unsaved(None):
+    for directory, record in unsaved_runs(None):
         if record["id"] == run:
             return directory, record, False
     raise ProjectError(f"No review run found for {run}.")

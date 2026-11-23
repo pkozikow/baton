@@ -11,7 +11,7 @@ import time
 from typing import Any
 
 from ..manifest import entries
-from ..native import github_repository
+from ..native import github_repository_for_remote
 
 CALL_TIMEOUT = 5.0
 TOTAL_BUDGET = 15.0
@@ -64,7 +64,7 @@ def _run(args: list[str], cwd: Path, timeout: float) -> tuple[int, str]:
 class RepositoryPulls:
     repo: str
     unavailable: str | None = None
-    branches: dict[str, list[dict[str, Any]] | None] = field(default_factory=dict)
+    branches: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
 
 
 def _pull_requests(output: str) -> list[dict[str, Any]]:
@@ -86,10 +86,20 @@ def lookup(project: dict[str, Any], *, call_timeout: float = CALL_TIMEOUT,
         result.append(pulls)
         branches = [entry["branch"] for entry in entries(repo, include_retired=True) if isinstance(entry.get("branch"), str)]
         source = Path(str(repo.get("source", "")))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            pulls.unavailable = "lookup time budget exhausted"
+            continue
         if not source.is_absolute() or not source.is_dir():
             pulls.unavailable = "source checkout is missing"
             continue
-        repository = github_repository(source)
+        try:
+            code, remote = _run(["git", "-C", str(source), "config", "--get", "remote.origin.url"], source,
+                                min(call_timeout, remaining))
+        except (OSError, subprocess.TimeoutExpired):
+            pulls.unavailable = "lookup failed"
+            continue
+        repository = github_repository_for_remote(remote.strip()) if code == 0 else None
         if repository is None:
             pulls.unavailable = "not a GitHub repository"
             continue
