@@ -185,6 +185,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_page(views.error_page(400, "Bad request", "The request path is malformed."), head)
             return
         try:
+            if path == "/favicon.ico":
+                # Browsers request it on every first load; a 404 would log a console error per page.
+                self.send(204, b"", "image/x-icon", [("Cache-Control", "max-age=86400")], head=True)
+                return
             if path.startswith("/static/"):
                 found = static_file(path.removeprefix("/static/"))
                 if found is None:

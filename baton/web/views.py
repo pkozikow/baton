@@ -419,6 +419,9 @@ def files_page(manager: Any, project: dict[str, Any], path: str) -> Page:
             return Page(title, nav + listing(project, relative, descriptor))
         if not stat.S_ISREG(mode):
             return not_found()
+        if path.endswith("/"):
+            # Served under a trailing slash, the file's relative links would resolve beneath it.
+            return Page(title, "", status=301, location=file_url(project["uuid"], relative))
         size = os.fstat(descriptor).st_size
     finally:
         os.close(descriptor)
