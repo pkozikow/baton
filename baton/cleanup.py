@@ -380,7 +380,7 @@ class CleanupMixin(ForceCleanupMixin):
                 raise ProjectError(f"The shared artifacts checkout {shared} has unpublished commits outside "
                                    f"{final.parent} ({self.summarize(unpublished)}); ask the user to publish or "
                                    "reconcile them before cleanup.")
-        incoming = set(filter(None, git(shared, "diff", "--name-only", "--no-renames", "-z", head, upstream).split("\0")))
+        incoming = set(self.changed_paths(shared, head, upstream))
         collisions = sorted(incoming & set(local_changes(shared)))
         if collisions:
             raise ProjectError(f"Local files in the shared artifacts checkout {shared} collide with changes in "

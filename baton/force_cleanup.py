@@ -148,8 +148,9 @@ class ForceCleanupMixin(ManagerCore):
                         f"{artifacts_record['branch']}: the archived project keeps pointing at the worktree. ")
             if self.force_artifacts_merged(project):
                 # An earlier ordinary cleanup got as far as merging the branch.
-                warn(leftover + f"The branch is already merged, so its content is at {artifacts_record['final_path']} "
-                                "once the shared artifacts checkout is up to date; remove the worktree and branch by hand.")
+                warn(leftover + f"The branch is already merged: its content is also at {artifacts_record['final_path']} "
+                                "once the shared artifacts checkout is up to date. Keep the worktree for as long as "
+                                "the archived project should resolve.")
             else:
                 warn(leftover + f"Force cleanup merges nothing (the branch is on origin/{artifacts_record['branch']} "
                                 "when its push succeeded). Merge the branch by hand; its sealed coordination names "
@@ -186,14 +187,21 @@ class ForceCleanupMixin(ManagerCore):
                 self.state['projects'].pop(project['slot'], None)
         print(f"Slot {project['slot']} is ready for another project.")
 
-    @staticmethod
-    def force_artifacts_merged(project: dict[str, Any]) -> bool:
-        """Whether the sealed artifacts branch is in the default branch, as far as the last fetch knows."""
-        sealed = (project.get('coordination_archive') or {}).get('commit')
-        source = Path(project['artifacts_branch']['source'])
-        upstream = sealed and git(source, 'symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD', check=False)
-        return bool(upstream) and subprocess.run(['git', '-C', str(source), 'merge-base', '--is-ancestor', sealed, upstream],
-                                                 capture_output=True).returncode == 0
+    def force_artifacts_merged(self, project: dict[str, Any]) -> bool:
+        """Whether everything in the artifacts worktree is in the default branch, as far as the last fetch knows.
+
+        Judged by the branch as it is now, not by the sealed commit: later commits or uncommitted files are unmerged.
+        """
+        record = project['artifacts_branch']
+        source, worktree = Path(record['source']), Path(record['path'])
+        try:
+            upstream = self.base(source, refresh=False)
+            tip = git(source, 'rev-parse', '--verify', f"refs/heads/{record['branch']}")
+            clean = not git(worktree, 'status', '--porcelain', '--untracked-files=all')
+        except FORCE_FAILURES:
+            return False
+        return clean and subprocess.run(['git', '-C', str(source), 'merge-base', '--is-ancestor', tip, upstream],
+                                        capture_output=True).returncode == 0
 
     def force_artifact_directory(self, project: dict[str, Any]) -> Path:
         directory = self.validate_retro_directory(project)

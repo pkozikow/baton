@@ -701,6 +701,10 @@ class DedicatedCleanupTest(DedicatedFixture):
         self.assertTrue(worktree.is_dir() and self.checkout("alpha").is_dir())
         self.assertIn("moved after it was sealed", self.cli("cleanup", "p3", ok=False).stderr)
         self.assertEqual(len(self.gh_calls("merge")), 1)
+        # The sealed commit is merged, but the later one is not: force cleanup must not call the branch merged.
+        forced = self.force()
+        self.assertIn("Merge the branch by hand", forced.stderr)
+        self.assertNotIn("The branch is already merged", forced.stderr)
 
     def test_turning_the_setting_off_mid_project_still_merges_through_the_pull_request(self) -> None:
         project, worktree, name, final = self.started()
