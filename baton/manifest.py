@@ -92,6 +92,7 @@ def project_claims(project: dict[str, Any]) -> set[tuple[str, ...]]:
     rename = project.get("pending_rename") or {}
     claims: set[tuple[str, ...]] = {("name", name) for name in (project["name"], rename.get("name"),
                                                                 *project.get("previous_names", [])) if name}
+    claims.update(("coordinator", ref.casefold()) for ref in (project["branch"], rename.get("branch")) if ref)
     artifact_path = project.get("artifacts_path")
     if artifact_path:
         claims.add(("artifacts", str(artifact_path)))
@@ -114,6 +115,8 @@ def project_claims(project: dict[str, Any]) -> set[tuple[str, ...]]:
 def claim_conflict(claim: tuple[str, ...], owner: str) -> ProjectError:
     if claim[0] == "name":
         return ProjectError(f"Project already active or a former name of one: {claim[1]} (claimed by {owner})")
+    if claim[0] == "coordinator":
+        return ProjectError(f"Coordinator branch conflicts with {owner}: {claim[1]}")
     if claim[0] == "artifacts":
         return ProjectError(f"Artifact destination belongs to another project: {claim[1]} (claimed by {owner})")
     if claim[0] == "branch":

@@ -479,6 +479,9 @@ class ProjectManagerTest(unittest.TestCase):
         conflict = self.cli("create", "renamed", "-r", "gamma", cwd=self.slots / "p4", ok=False)
         self.assertIn("Project already active", conflict.stderr)
         self.assertFalse(self.checkout("gamma", "renamed").exists())
+        conflict = self.cli("create", "Renamed", "-r", "gamma", cwd=self.slots / "p4", ok=False)
+        self.assertIn("Coordinator branch conflicts with project example in slot p3", conflict.stderr)
+        self.assertFalse(self.checkout("gamma", "Renamed").exists())
         self.git(beta, "worktree", "unlock", str(self.checkout("Beta")))
         self.cli("rename", "renamed", cwd=self.slots / "p3")
 

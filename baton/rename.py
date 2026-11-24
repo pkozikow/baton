@@ -41,7 +41,7 @@ class RenameMixin(ManagerCore):
                    for p in self.state["projects"].values()):
                 raise ProjectError(f"Project already active or a former name of one: {name}")
             repo_branch = project_code_branch(project, name)
-            self.reserve({("name", name)} | set().union(*(
+            self.reserve({("name", name), ("coordinator", name.casefold())} | set().union(*(
                 entry_claims(r["common_dir"], repo_branch, str(self.worktrees / r["id"] / name)) for r in project["repos"])))
             self.check_coordinator(project)
             for repo in project["repos"]:

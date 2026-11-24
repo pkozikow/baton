@@ -71,8 +71,9 @@ class LifecycleMixin(ManagerCore):
                            pending_follow_up_context=follow_up["context"])
             self.preflight_follow_up(project)
         self.check_fresh_artifacts(project)
-        self.reserve({("name", name), ("artifacts", project["artifacts_path"])} | set().union(*(entry_claims(r["common_dir"], r["branch"], r["path"])
-                                                      for r in self.resolve_repos(repos, project, existing))))
+        claims = {("name", name), ("coordinator", name.casefold()), ("artifacts", project["artifacts_path"])}
+        self.reserve(claims | set().union(*(entry_claims(r["common_dir"], r["branch"], r["path"])
+                                          for r in self.resolve_repos(repos, project, existing))))
         if existing:
             if not sys.stdin.isatty():
                 raise ProjectError(f"Slot {slot} is occupied by {existing['name']}; interactive confirmation is required, or run cleanup explicitly.")
