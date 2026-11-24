@@ -311,6 +311,9 @@ class GdocCommandTest(unittest.TestCase):
 
     def setUp(self) -> None:
         fixtures.ProjectManagerTest.setUp(self)
+        self.start_project()
+
+    def start_project(self) -> None:
         self.make_repo("alpha")
         self.create("alpha")
         self.directory = artifact_path(self.projects, self.artifacts, "example")
@@ -995,6 +998,76 @@ Path(args[args.index("-o") + 1]).write_bytes(
     b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
     + chunk(b"IDAT", pixels) + chunk(b"IEND", b""))
 '''
+
+
+class DedicatedBranchGdocTest(unittest.TestCase):
+    """A project with its own artifacts branch commits Doc changes there and pushes only that branch."""
+    run_command = fixtures.ProjectManagerTest.run_command
+    git = fixtures.ProjectManagerTest.git
+    cli = fixtures.ProjectManagerTest.cli
+    make_repo = fixtures.ProjectManagerTest.make_repo
+    create = fixtures.ProjectManagerTest.create
+    checkout = fixtures.ProjectManagerTest.checkout
+    respond = GdocCommandTest.respond
+    serve = GdocCommandTest.serve
+    serve_push = GdocCommandTest.serve_push
+    calls = GdocCommandTest.calls
+    gdoc = GdocCommandTest.gdoc
+    linked = GdocCommandTest.linked
+    three_diagrams = GdocCommandTest.three_diagrams
+
+    def setUp(self) -> None:
+        fixtures.ProjectManagerTest.setUp(self)
+        self.origin = fixtures.ProjectManagerTest.add_artifacts_origin(self)
+        self.cli("config", "set", "--dedicated-artifacts-branch")
+        GdocCommandTest.start_project(self)
+        state = fixtures.read_state(self.projects)["projects"]["p3"]
+        self.branch = state["artifacts_branch"]["branch"]
+        self.worktree = Path(state["artifacts_branch"]["path"])
+        self.shared = self.git(self.artifacts, "rev-parse", "HEAD")
+        # Upstream moves on, so the project branch is behind origin/main and has no remote branch yet.
+        other = self.root / "artifacts-other"
+        self.git(self.root, "clone", "-q", str(self.origin), str(other))
+        (other / "upstream.md").write_text("Upstream\n")
+        self.git(other, "add", "upstream.md")
+        self.git(other, "commit", "-qm", "Add upstream.md")
+        self.git(other, "push", "-q")
+        self.upstream = self.git(other, "rev-parse", "HEAD")
+
+    def commit_files(self, message: str, *paths: Path) -> None:
+        self.git(self.worktree, "add", "--", *map(str, paths))
+        self.git(self.worktree, "commit", "-qm", message)
+
+    def assert_published_on_the_branch(self, message: str) -> None:
+        self.assertEqual(self.git(self.worktree, "log", "-1", "--format=%s"), message)
+        self.assertEqual(self.git(self.origin, "rev-parse", f"refs/heads/{self.branch}"),
+                         self.git(self.worktree, "rev-parse", "HEAD"))
+        self.assertEqual(self.git(self.worktree, "status", "--porcelain"), "")
+        self.assertEqual(self.git(self.origin, "rev-parse", "main"), self.upstream)
+        self.assertEqual(self.git(self.artifacts, "rev-parse", "HEAD"), self.shared)
+
+    def test_pull_commits_on_the_branch_and_pushes_it(self) -> None:
+        self.linked("spec.md", "old\n")
+        self.serve(document("New."), "New.\n")
+        result = self.gdoc("pull")
+        self.assertNotIn("fetch origin", result.stderr)
+        self.assertEqual(result.stdout.count(f"Pushed artifacts branch {self.branch}"), 1)
+        self.assert_published_on_the_branch("Pull spec.md from its Google Doc")
+
+    def test_push_needs_no_default_branch_sync(self) -> None:
+        path, doc = self.three_diagrams()
+        self.serve_push(doc)
+        result = self.gdoc("push", str(path))
+        self.assertNotIn("fetch origin", result.stderr)
+        self.assert_published_on_the_branch("Push diagrams of spec.md to its Google Doc")
+
+    def test_sealed_project_is_refused_before_the_doc_is_read(self) -> None:
+        self.linked("spec.md", "old\n")
+        record = fixtures.state_file(self.projects)
+        record.write_text(json.dumps(dict(json.loads(record.read_text()), state="cleaning")))
+        refused = self.gdoc("pull", ok=False)
+        self.assertIn("sealed", refused.stderr)
+        self.assertEqual(self.calls(), [])
 
 
 if __name__ == "__main__":

@@ -131,6 +131,25 @@ class ProjectManagerTest(unittest.TestCase):
             self.git(repo, "remote", "set-head", "origin", "-a")
         return repo
 
+    def github_origin(self, repo: Path, name: str) -> Path:
+        """Give a checkout a GitHub origin URL that Git rewrites to a local bare repository."""
+        origin = self.root / f"{name}.git"
+        if not origin.exists():
+            self.git(self.root, "init", "--bare", "-b", "main", str(origin))
+        url = f"https://github.com/example/{name}.git"
+        self.git(repo, "remote", "set-url" if self.git(repo, "remote") else "add", "origin", url)
+        # Shared by every worktree of the repository, while baton still reads the GitHub URL from remote.origin.url.
+        self.git(repo, "config", f"url.{origin}.insteadOf", url)
+        default = self.git(repo, "branch", "--show-current")
+        self.git(repo, "push", "-q", "origin", default)
+        self.git(repo, "fetch", "-q", "origin")
+        self.git(repo, "remote", "set-head", "origin", default)
+        return origin
+
+    def add_artifacts_origin(self) -> Path:
+        """A GitHub-looking origin for the artifacts checkout, as dedicated_artifacts_branch requires."""
+        return ProjectManagerTest.github_origin(self, self.artifacts, "artifacts")
+
     def checkout(self, repo: str, project: str = "example") -> Path:
         return self.worktrees / repo / project
 
