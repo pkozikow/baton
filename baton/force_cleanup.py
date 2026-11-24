@@ -15,7 +15,7 @@ from blackboard import BlackboardError
 
 from .core import ManagerCore
 from .errors import ProjectError
-from .gitutil import branch, common_dir, git, inside, write_json
+from .gitutil import branch, common_dir, git, inside, worktree_on_branch, write_json
 from .manifest import branch_suffix, managed_links, project_claims, project_entries
 from .native import registered_stacks
 
@@ -197,7 +197,8 @@ class ForceCleanupMixin(ManagerCore):
         try:
             upstream = self.base(source, refresh=False)
             tip = git(source, 'rev-parse', '--verify', f"refs/heads/{record['branch']}")
-            clean = not git(worktree, 'status', '--porcelain', '--untracked-files=all')
+            clean = (worktree_on_branch(worktree, Path(record['common_dir']), record['branch'])
+                     and not git(worktree, 'status', '--porcelain', '--untracked-files=all'))
         except FORCE_FAILURES:
             return False
         return clean and subprocess.run(['git', '-C', str(source), 'merge-base', '--is-ancestor', tip, upstream],
