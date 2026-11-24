@@ -1070,5 +1070,61 @@ class DedicatedBranchGdocTest(unittest.TestCase):
         self.assertEqual(self.calls(), [])
 
 
+class SharedCheckoutPullRequestGdocTest(unittest.TestCase):
+    """With the setting on, a project without its own branch publishes Doc changes through merged pull requests."""
+    run_command = fixtures.ProjectManagerTest.run_command
+    git = fixtures.ProjectManagerTest.git
+    cli = fixtures.ProjectManagerTest.cli
+    make_repo = fixtures.ProjectManagerTest.make_repo
+    create = fixtures.ProjectManagerTest.create
+    checkout = fixtures.ProjectManagerTest.checkout
+    respond = GdocCommandTest.respond
+    serve = GdocCommandTest.serve
+    serve_push = GdocCommandTest.serve_push
+    calls = GdocCommandTest.calls
+    gdoc = GdocCommandTest.gdoc
+    linked = GdocCommandTest.linked
+    commit_files = GdocCommandTest.commit_files
+    three_diagrams = GdocCommandTest.three_diagrams
+
+    def setUp(self) -> None:
+        fixtures.ProjectManagerTest.setUp(self)
+        self.origin = fixtures.ProjectManagerTest.add_artifacts_origin(self)
+        self.pull_requests = fixtures.ProjectManagerTest.fake_pull_requests(self)
+        # Created with the setting off, so the project commits in the shared checkout.
+        GdocCommandTest.start_project(self)
+        self.cli("config", "set", "--dedicated-artifacts-branch")
+        other = self.root / "artifacts-other"
+        self.git(self.root, "clone", "-q", str(self.origin), str(other))
+        (other / "upstream.md").write_text("Upstream\n")
+        self.git(other, "add", "upstream.md")
+        self.git(other, "commit", "-qm", "Add upstream.md")
+        self.git(other, "push", "-q")
+        self.upstream = self.git(other, "rev-parse", "HEAD")
+
+    def assert_published(self, message: str, count: int) -> None:
+        prs = json.loads(self.pull_requests.read_text())
+        self.assertEqual([pr["state"] for pr in prs], ["MERGED"] * count)
+        self.assertEqual(self.git(self.artifacts, "log", "-1", "--no-merges", "--format=%s"), message)
+        self.assertEqual(self.git(self.artifacts, "rev-parse", "HEAD"), self.git(self.origin, "rev-parse", "main"))
+        self.git(self.origin, "merge-base", "--is-ancestor", self.upstream, "main")
+        self.assertEqual(self.git(self.artifacts, "status", "--porcelain"), "")
+
+    def test_pull_publishes_through_one_merged_pull_request(self) -> None:
+        self.linked("spec.md", "old\n")
+        self.serve(document("New."), "New.\n")
+        result = self.gdoc("pull")
+        self.assertNotIn("Pushed", result.stdout)
+        self.assert_published("Pull spec.md from its Google Doc", 1)
+
+    def test_push_from_an_unpublished_checkout_publishes_it_first(self) -> None:
+        # The link commits are local, and origin/main moved on: the checkout is ahead and behind.
+        path, doc = self.three_diagrams()
+        self.serve_push(doc)
+        self.gdoc("push", str(path))
+        self.assertEqual(len(self.calls("docs documents batchUpdate")), 1)
+        self.assert_published("Push diagrams of spec.md to its Google Doc", 2)
+
+
 if __name__ == "__main__":
     unittest.main()

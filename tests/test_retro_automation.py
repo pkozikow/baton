@@ -542,6 +542,21 @@ print("BATON_RETRO_DRAFT_BEGIN\\n" + text + "\\nBATON_RETRO_DRAFT_END")
                 self.assertEqual(snapshot["uuid"], project["uuid"])
                 self.assertTrue(snapshot["archived"])
 
+    def test_unattended_retro_publishes_through_a_pull_request_with_dedicated_artifacts_branch(self) -> None:
+        origin = manager_fixtures.ProjectManagerTest.add_artifacts_origin(self)
+        pull_requests = manager_fixtures.ProjectManagerTest.fake_pull_requests(self)
+        project = self.archive()
+        self.saved_evidence(project)
+        self.cli("config", "set", "--dedicated-artifacts-branch")
+        self.fake_fork()
+        result = json.loads(self.cli("retro", "pending", "--json").stdout)
+        self.assertEqual(result["runs"][0]["status"], "completed")
+        head = self.git(self.artifacts, "rev-parse", "HEAD")
+        self.assertEqual(head, self.git(origin, "rev-parse", "main"))
+        self.assertIn("retrospective", self.git(self.artifacts, "log", "-1", "--format=%s", "HEAD^2"))
+        self.assertEqual([pr["state"] for pr in json.loads(pull_requests.read_text())], ["MERGED"])
+        self.assertEqual(self.git(self.artifacts, "status", "--porcelain"), "")
+
     def test_non_fork_providers_run_fresh_unattended_sessions_with_their_prompt_delivery(self) -> None:
         cases = (("agy", "argv"), ("cursor", "argv"), ("extra", "stdin"), ("extra", "argv"))
         for index, (provider, delivery) in enumerate(cases):
