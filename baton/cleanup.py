@@ -21,6 +21,14 @@ from .force_cleanup import ForceCleanupMixin
 ARCHIVE_SKIPPED = "archive-skipped.txt"
 
 
+def require_supported_cleanup(project: dict[str, Any]) -> None:
+    """Merging a dedicated artifacts branch is not implemented yet; cleanup must not archive it unmerged."""
+    if project.get("artifacts_branch"):
+        raise ProjectError(f"Cleanup of project {project['name']}, which has a dedicated artifacts branch, is not "
+                           "supported yet; baton cleanup --force releases the slot and keeps the artifacts branch "
+                           "and worktree.")
+
+
 def unarchived_notes(worktree: Path, archive: Path) -> list[str]:
     """Ignored note files with neither an identical copy under the project's artifacts nor a retro skip record."""
     skip_list = archive / ARCHIVE_SKIPPED
@@ -49,6 +57,7 @@ class CleanupMixin(ForceCleanupMixin):
             self.force_cleanup(selector, dry_run)
             return
         project = self.project(selector)
+        require_supported_cleanup(project)
         if project.get("pending_abandon") and not abandonment_verified:
             if dry_run:
                 raise ProjectError(f"Abandonment is pending; resume with: baton abandon {project['uuid']}")

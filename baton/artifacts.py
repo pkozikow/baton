@@ -1,6 +1,7 @@
 """Blackboard setup and commits of project artifacts in the shared artifacts checkout."""
 
 import contextlib
+import json
 import os
 from pathlib import Path, PurePosixPath
 import stat
@@ -14,7 +15,7 @@ from blackboard import Blackboard, revision_of
 from .blackboard_sqlite import SQLiteBlackboard, SCHEMA_VERSION
 from .errors import ProjectError
 from .gitutil import git, common_dir, branch, file_lock, inside, require_agent_write_path
-from .manifest import project_entries, subplan_directory, coordination_context
+from .manifest import project_entries, subplan_directory, coordination_context, artifacts_branch_name
 from .core import ManagerCore
 
 
@@ -76,8 +77,9 @@ class ArtifactsMixin(ManagerCore):
             raise ProjectError("Project artifacts belong to an unexpected nested repository.")
         return root
 
-    def preflight_blackboard(self, project: dict[str, Any]) -> None:
-        directory = self.artifact_directory(project)
+    def preflight_blackboard(self, project: dict[str, Any], directory: Path | None = None) -> None:
+        """Check the board's ignore rules in the project's directory, or in the given one before it exists."""
+        directory = self.artifact_directory(project) if directory is None else directory
         if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
             raise ProjectError(f"Unsafe project artifacts directory: {directory}")
         root = self.artifacts_git(directory)
@@ -205,8 +207,9 @@ class ArtifactsMixin(ManagerCore):
             "schema_version": manifest["schema_version"], "context": manifest.get("context", {}),
             "checksums": {name: revision_of((directory / name).read_bytes()) for name in names}}
         self.save()
+        target = artifacts_branch_name(project)
         self.commit_artifact_paths(root, "Preserve sealed project coordination", relative, push=False, sync=False,
-                                   artifacts_root=self.artifact_directory(project).parent)
+                                   artifacts_root=self.artifact_directory(project).parent, expected_branch=target)
         commit = git(root, "rev-parse", "HEAD")
         archive = project["coordination_archive"]
         self.verify_archive_commit(root, commit, relative, archive["checksums"])
@@ -214,7 +217,7 @@ class ArtifactsMixin(ManagerCore):
         self.save()
         # Remote publication may fail; the verified local preservation commit remains authoritative.
         self.commit_artifact_paths(root, "Preserve sealed project coordination", relative, push=True,
-                                   artifacts_root=self.artifact_directory(project).parent)
+                                   artifacts_root=self.artifact_directory(project).parent, expected_branch=target)
 
     @staticmethod
     def verify_archive_commit(root: Path, commit: str, paths: list[str], checksums: dict[str, str]) -> dict[str, bytes]:
@@ -230,7 +233,13 @@ class ArtifactsMixin(ManagerCore):
         return evidence
 
     def commit_artifacts(self, project: dict[str, Any], message: str, paths: list[str], push: bool = True) -> None:
-        """Commit only these project artifact paths in the shared checkout, leaving other staged work alone."""
+        """Commit only these project artifact paths, leaving other staged work alone.
+
+        They go on the project's artifacts branch when it has one, otherwise on the shared checkout's default branch.
+        """
+        target = artifacts_branch_name(project)
+        if target is not None:
+            self.require_open_artifacts(project)
         directory = self.artifact_directory(project)
         if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
             raise ProjectError(f"Unsafe project artifacts directory: {directory}")
@@ -246,7 +255,31 @@ class ArtifactsMixin(ManagerCore):
                 raise ProjectError(f"{supplied} is another branch's subplan; from this branch checkout commit only "
                                    f"{owned}, and leave other subplans to their workers or the parent.")
             relative.append(str(path.relative_to(root)))
-        self.commit_artifact_paths(root, message, relative, push, artifacts_root=directory.parent)
+        self.commit_artifact_paths(root, message, relative, push, artifacts_root=directory.parent,
+                                   prepare=None if target is None else lambda: self.require_open_artifacts(project),
+                                   expected_branch=target)
+
+    def require_open_artifacts(self, project: dict[str, Any]) -> None:
+        """Refuse new artifacts on a sealed project branch, judged from the registry as it is now.
+
+        Cleanup seals the branch when it starts, and force cleanup archives the project with the branch retained.
+        Cleanup's own seal commits go through preserve_blackboard, not here.
+        """
+        current = None
+        for path in (self.layout / "projects").glob("*.json"):
+            try:
+                record = json.loads(path.read_text())
+            except FileNotFoundError:
+                continue
+            if record.get("uuid") == project["uuid"]:
+                current = record
+        if current is None:
+            current = next((p for p in self.archived_projects() if p["uuid"] == project["uuid"]), project)
+        state = "archived" if current.get("_archived") else current.get("state")
+        target = artifacts_branch_name(current)
+        if target is not None and state in ("cleaning", "archived"):
+            raise ProjectError(f"Project {current['name']} is {state} and its artifacts branch {target} is sealed; "
+                               "it takes no new artifacts.")
 
     @staticmethod
     def owned_artifacts(project: dict[str, Any], directory: Path) -> Path | None:
@@ -261,9 +294,15 @@ class ArtifactsMixin(ManagerCore):
         entry = max(here, key=lambda e: len(e["path"]))
         return subplan_directory(directory, entry["id"], entry["branch"], project.get("branch_prefix"))
 
-    def artifact_checkout(self, root: Path, relative: list[str]) -> str:
-        """Check that the shared checkout can take a commit of these paths and return its default branch."""
-        default = self.base(root, refresh=False).removeprefix("refs/remotes/origin/").removeprefix("refs/heads/")
+    def artifact_checkout(self, root: Path, relative: list[str], expected_branch: str | None = None) -> str:
+        """Check that the checkout can take a commit of these paths and return the branch it commits on.
+
+        Without an expected branch, that is the shared checkout's default branch.
+        """
+        if expected_branch is None:
+            default = self.base(root, refresh=False).removeprefix("refs/remotes/origin/").removeprefix("refs/heads/")
+        else:
+            default = expected_branch
         if branch(root) != default:
             raise ProjectError(f"Project artifacts are committed only on {default}; {root} is on "
                                f"{branch(root) or 'a detached HEAD'}.")
@@ -289,8 +328,14 @@ class ArtifactsMixin(ManagerCore):
     def commit_artifact_paths(self, root: Path, message: str, relative: list[str], push: bool = True,
                               sync: bool = True, artifacts_root: Path | None = None,
                               prepare: Callable[[], None] | None = None,
-                              after_commit: Callable[[], None] | None = None) -> dict[str, bool]:
-        default = self.artifact_checkout(root, relative)
+                              after_commit: Callable[[], None] | None = None,
+                              expected_branch: str | None = None) -> dict[str, bool]:
+        """Commit on the default branch of the shared checkout, or on a project's artifacts branch.
+
+        A project branch has a single writer checkout, so it is neither synced nor compared with origin: the commit
+        is pushed to origin/<branch>, which creates it on the first push.
+        """
+        default = self.artifact_checkout(root, relative, expected_branch)
         remote = push and "origin" in git(root, "remote").splitlines()
         requested = relative
 
@@ -318,7 +363,7 @@ class ArtifactsMixin(ManagerCore):
             return bool(git(root, "--literal-pathspecs", "ls-tree", "-r", "--name-only", "HEAD", "--", path))
 
         # Network calls stay outside the lock so parallel plan commits do not queue behind them.
-        fetched = remote and sync and self.fetch_artifacts(root, default)
+        fetched = remote and sync and expected_branch is None and self.fetch_artifacts(root, default)
         pushable = False
         with self.artifacts_lock(root):
             if fetched:
@@ -360,14 +405,16 @@ class ArtifactsMixin(ManagerCore):
             if remote:
                 if branch(root) != default:
                     self.artifact_warning(root, default, f"{root} left {default} during the commit; nothing was pushed.")
-                elif not sync or fetched:
+                elif expected_branch is not None or not sync or fetched:
                     pushable = True
         published = False
-        if pushable:
+        if pushable and expected_branch is not None:
+            published = self.push_artifacts_branch(root, expected_branch)
+        elif pushable:
             # Also pushes earlier artifact commits whose push failed, e.g. when a retried commit has nothing new.
             pushed = self.push_artifacts(root, default, artifacts_root=artifacts_root)
             published = pushed or bool(fetched and self.artifact_divergence(root, default) == (0, 0))
-        elif remote and sync and not fetched:
+        elif remote and sync and not fetched and expected_branch is None:
             self.artifact_warning(root, default, "Push skipped because fetch failed; artifact commits are saved locally. "
                                                  "Retry artifacts commit to publish them.")
         return {"published": published, "fetch_succeeded": bool(fetched)}
@@ -448,6 +495,16 @@ class ArtifactsMixin(ManagerCore):
     @staticmethod
     def summarize(paths: list[str]) -> str:
         return ", ".join(paths[:3]) + (f" and {len(paths) - 3} more" if len(paths) > 3 else "")
+
+    def push_artifacts_branch(self, root: Path, name: str) -> bool:
+        """Publish a project's artifacts branch, including earlier commits whose push failed."""
+        pushed = self.remote_git(root, "push", "--quiet", "origin", f"refs/heads/{name}:refs/heads/{name}")
+        if pushed.returncode:
+            self.artifact_warning(root, name, f"Push to origin/{name} failed; artifact commits are saved locally. "
+                                              f"Retry artifacts commit to publish them.\n{pushed.stderr.strip()}")
+        else:
+            print(f"Pushed artifacts branch {name} to origin/{name}.", flush=True)
+        return pushed.returncode == 0
 
     def push_artifacts(self, root: Path, default: str, *, artifacts_root: Path | None = None) -> bool:
         counts = self.artifact_divergence(root, default)

@@ -27,6 +27,7 @@ from typing import Any, Callable
 from .doctor_freshness import require_trusted_runtime
 from .errors import ProjectError
 from .gitutil import git, inside, write_json
+from .manifest import artifacts_branch_name
 
 
 LINKS_FILE = "gdoc-links.json"
@@ -580,7 +581,10 @@ class Target:
 class Gdoc:
     def __init__(self, manager: Any, project: dict[str, Any]) -> None:
         self.manager = manager
+        self.project = project
         self.uuid = project["uuid"]
+        # A project's own artifacts branch has a single writer checkout: no default-branch sync applies to it.
+        self.branch = artifacts_branch_name(project)
         directory = manager.artifact_directory(project)
         if directory.is_symlink() or not directory.is_dir():
             raise ProjectError(f"Unsafe or missing project artifacts directory: {directory}")
@@ -666,9 +670,21 @@ class Gdoc:
             raise ProjectError(f"Refusing a symlinked artifact: {path}")
         return path.read_bytes().decode()
 
+    def require_open(self) -> None:
+        if self.branch is not None:
+            self.manager.require_open_artifacts(self.project)
+
+    def guarded(self, prepare: Callable[[], None]) -> Callable[[], None]:
+        """Recheck the seal under the artifact lock, before prepare can change the Doc."""
+        def run() -> None:
+            self.require_open()
+            prepare()
+        return run
+
     def commit(self, message: str, paths: list[Path], prepare: Callable[[], None], push: bool = True) -> None:
         self.manager.commit_artifact_paths(self.root, message, [self.relative(path) for path in paths], push=push,
-                                           artifacts_root=self.directory.parent, prepare=prepare)
+                                           artifacts_root=self.directory.parent, prepare=self.guarded(prepare),
+                                           expected_branch=self.branch)
 
     def save(self, path: Path, original: str, new: str, update: Callable[[list[dict[str, str]]], list[dict[str, str]]],
              message: str) -> None:
@@ -705,7 +721,7 @@ class Gdoc:
             return update
 
         # Fail before touching Google when the checkout could not take the commit.
-        self.manager.artifact_checkout(self.root, [self.relative(path), self.relative(self.links_path)])
+        self.manager.artifact_checkout(self.root, [self.relative(path), self.relative(self.links_path)], self.branch)
         if url is not None:
             document_id = document_id_from(url)
             add(document_id)(self.read_links())
@@ -764,8 +780,8 @@ class Gdoc:
         paths = [self.artifact(path) for path in supplied]
         # Sync once for the whole run rather than once per committed link.
         remote = push and not dry_run and "origin" in git(self.root, "remote").splitlines()
-        default = self.manager.artifact_checkout(self.root, []) if remote else ""
-        fetched = remote and self.manager.fetch_artifacts(self.root, default)
+        default = self.manager.artifact_checkout(self.root, [], self.branch) if remote else ""
+        fetched = remote and self.branch is None and self.manager.fetch_artifacts(self.root, default)
         if fetched:
             with self.manager.artifacts_lock(self.root):
                 self.manager.fast_forward_artifacts(self.root, default, artifacts_root=self.directory.parent)
@@ -787,7 +803,9 @@ class Gdoc:
             except (ProjectError, OSError, ValueError) as error:
                 failed += 1
                 print(f"baton gdoc: {link['path']}: not pulled: {error}", file=sys.stderr, flush=True)
-        if fetched:
+        if remote and self.branch is not None:
+            self.manager.push_artifacts_branch(self.root, self.branch)
+        elif fetched:
             self.manager.push_artifacts(self.root, default, artifacts_root=self.directory.parent)
         elif remote:
             self.manager.artifact_warning(self.root, default, "Push skipped because fetch failed; pulled archives are "
@@ -842,10 +860,15 @@ class Gdoc:
                                    "nothing was written. Pull again.")
             path.write_bytes(new.encode())
         self.manager.commit_artifact_paths(self.root, f"Pull {link['path']} from its Google Doc", [self.relative(path)],
-                                           push=False, sync=False, artifacts_root=self.directory.parent, prepare=prepare)
+                                           push=False, sync=False, artifacts_root=self.directory.parent,
+                                           prepare=self.guarded(prepare), expected_branch=self.branch)
 
     def require_current(self) -> None:
         """Push changes the Doc irreversibly, so unlike plain artifact commits it refuses a stale checkout."""
+        if self.branch is not None:
+            # Normally behind the default branch, and a missing remote branch is not "behind" either.
+            self.manager.artifact_checkout(self.root, [], self.branch)
+            return
         if "origin" not in git(self.root, "remote").splitlines():
             return
         default = self.manager.artifact_checkout(self.root, [])
@@ -857,7 +880,7 @@ class Gdoc:
         self.require_not_behind()
 
     def require_not_behind(self) -> None:
-        if "origin" not in git(self.root, "remote").splitlines():
+        if self.branch is not None or "origin" not in git(self.root, "remote").splitlines():
             return
         default = self.manager.artifact_checkout(self.root, [])
         counts = self.manager.artifact_divergence(self.root, default)
@@ -1023,6 +1046,8 @@ def main(argv: list[str] | None = None) -> int:
         manager = Manager()
         manager.load()
         gdoc = Gdoc(manager, manager.artifact_project(args.selector))
+        if not getattr(args, "dry_run", False):
+            gdoc.require_open()
         if args.action == "link":
             gdoc.link(args.path, args.url, args.title)
         elif args.action == "pull":

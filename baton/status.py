@@ -201,6 +201,8 @@ class StatusMixin(ManagerCore):
             "pending_operation": {"operation": project["state"], "command": resume} if resume else None,
             "current_entry": max(here, key=lambda e: len(e["path"])) if here else None,
             "gdoc_links": gdoc_links(directory),
+            "artifacts_branch": ({key: project["artifacts_branch"].get(key) for key in ("branch", "path", "base_ref")}
+                                 if project.get("artifacts_branch") else None),
             "entries": result, "retired_entries": retired, "errors": errors,
         }
 
@@ -405,6 +407,8 @@ class StatusMixin(ManagerCore):
             print(f"  Pending {data['state']}; resume with: {data['pending_operation']['command']}")
         if data["blackboard"]:
             print(f"  Blackboard: {data['blackboard']['path']}")
+        if data["artifacts_branch"]:
+            print(f"  Artifacts branch: {data['artifacts_branch']['branch']} in {data['artifacts_branch']['path']}")
         for entry in data["entries"]:
             workflow = f"native stack {entry['stack_root']}" if entry["stack_root"] else "independent"
             base = entry["pr_base"] + ("" if entry["base_reliable"] else " (unreliable)")

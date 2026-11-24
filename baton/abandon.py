@@ -14,6 +14,7 @@ from .errors import ProjectError
 from .gitutil import common_dir, git
 from .manifest import entries, project_entries
 from .native import github_repository
+from .cleanup import require_supported_cleanup
 
 
 def open_repository_prs(source: Path, repository: str, branches: set[str], confirmed: set[int]) -> list[dict[str, Any]]:
@@ -183,6 +184,7 @@ class AbandonMixin(ManagerCore):
 
     def abandon(self, selector: str | None) -> None:
         project = self.project(selector)
+        require_supported_cleanup(project)
         pending = project.get("pending_abandon")
         if project["state"] not in (("active",) if pending is None else ("active", "abandoning", "cleaning")):
             raise ProjectError("Finish the outstanding project operation before abandonment.")

@@ -9,8 +9,10 @@ import uuid
 from typing import Any
 
 from .errors import ProjectError
-from .gitutil import git, common_dir, branch, write_json
-from .manifest import project_entries, entry_claims, managed_links
+from .gitutil import git, common_dir, branch, write_json, inside
+from .manifest import project_entries, entry_claims, managed_links, artifacts_final_path
+from .native import github_repository
+from .cleanup import require_supported_cleanup
 from .core import ManagerCore
 from .slots import SLOT_NAMES
 
@@ -62,16 +64,25 @@ class LifecycleMixin(ManagerCore):
         project = {"name": name, "slot": slot, "branch": f"{self.branch_prefix}/{name}", "branch_prefix": self.branch_prefix, "state": "creating", "repos": [],
                    "requested": repos, "uuid": uuid.uuid4().hex, "owner": None}
         project["artifacts_path"] = str(self.artifacts / f"{name}-{project['uuid'][:8]}")
+        if self.dedicated_artifacts_branch:
+            self.plan_artifacts_branch(project)
+        # A dedicated project's directory appears only with its worktree, so the shared checkout is checked instead.
+        final = artifacts_final_path(project)
         if follow_up is not None:
             project.update(follow_up_from=from_uuid, follow_up_root_name=follow_up["root"],
                            follow_up_number=follow_up["number"],
                            follow_up_path=str(self.artifact_directory(project) / "follow-up.md"),
                            pending_follow_up_context=follow_up["context"])
-            self.preflight_follow_up(project)
-        self.check_fresh_artifacts(project)
-        self.reserve({("name", name), ("artifacts", project["artifacts_path"])} | set().union(*(entry_claims(r["common_dir"], r["branch"], r["path"])
+            self.preflight_follow_up(project, final)
+        self.check_fresh_artifacts(final)
+        record = project.get("artifacts_branch")
+        artifact_claims = {("artifacts", project["artifacts_path"]), ("artifacts", str(final))}
+        if record:
+            artifact_claims |= entry_claims(record["common_dir"], record["branch"], record["path"])
+        self.reserve({("name", name)} | artifact_claims | set().union(*(entry_claims(r["common_dir"], r["branch"], r["path"])
                                                       for r in self.resolve_repos(repos, project, existing))))
         if existing:
+            require_supported_cleanup(existing)
             if not sys.stdin.isatty():
                 raise ProjectError(f"Slot {slot} is occupied by {existing['name']}; interactive confirmation is required, or run cleanup explicitly.")
             print(f"Slot {slot} contains project {existing['name']}. Cleanup will remove its registered worktrees and local branches:", file=sys.stderr)
@@ -84,10 +95,14 @@ class LifecycleMixin(ManagerCore):
         if (not existing or existing["branch"] != project["branch"]) and git(self.repo, "rev-parse", "--verify", f"refs/heads/{project['branch']}", check=False):
             raise ProjectError(f"Coordinator branch already exists: {project['branch']}")
         project["repos"] = self.prepare(repos, project, replacing=existing)
-        self.check_fresh_artifacts(project)
-        self.preflight_blackboard(project)
+        if record:
+            with self.repo_lock(self.artifacts_repository(record)):
+                record["base_ref"] = self.base(Path(record["source"]), refresh=True)
+            record["base_sha"] = git(Path(record["source"]), "rev-parse", record["base_ref"])
+        self.check_fresh_artifacts(final)
+        self.preflight_blackboard(project, final)
         if follow_up is not None:
-            self.preflight_follow_up(project)
+            self.preflight_follow_up(project, final)
         if existing:
             os.chdir(self.slots / slot)
             self.cleanup(slot, dry_run=False, allow_unmerged=[])
@@ -96,9 +111,58 @@ class LifecycleMixin(ManagerCore):
         self.save()
         self.finish_create(project)
 
-    def check_fresh_artifacts(self, project: dict[str, Any]) -> None:
+    def plan_artifacts_branch(self, project: dict[str, Any]) -> None:
+        """Record a new project's artifacts branch and worktree; finish_create creates them."""
+        final = Path(project["artifacts_path"])
+        source = self.artifacts_git(final)
+        if github_repository(source) is None:
+            raise ProjectError(f"dedicated_artifacts_branch requires a GitHub origin for the artifacts checkout {source}; "
+                               "add one or turn the setting off with baton config set --no-dedicated-artifacts-branch.")
+        # The directory name keeps the suffix stable through renames and apart from the project's code branches.
+        suffix = final.name
+        path = self.worktrees / source.name / suffix
+        project["artifacts_branch"] = {"source": str(source), "common_dir": str(common_dir(source)),
+                                       "branch": f"{project['branch_prefix']}/{suffix}", "path": str(path),
+                                       "final_path": str(final)}
+        project["artifacts_path"] = str(path / self.artifacts.relative_to(source) / suffix)
+        if path.exists() or path.is_symlink():
+            raise ProjectError(f"Artifacts worktree path already exists: {path}; retry creation for a new UUID.")
+        if git(source, "rev-parse", "--verify", f"refs/heads/{project['artifacts_branch']['branch']}", check=False):
+            raise ProjectError(f"Artifacts branch already exists in {source}: {project['artifacts_branch']['branch']}; "
+                               "retry creation for a new UUID.")
+
+    @staticmethod
+    def artifacts_repository(record: dict[str, Any]) -> dict[str, Any]:
+        """The fields repo_lock needs, for the artifacts repository that is not a project entry."""
+        return {"common_dir": record["common_dir"], "id": Path(record["source"]).name}
+
+    def ensure_artifacts_worktree(self, project: dict[str, Any]) -> None:
+        """Create the recorded artifacts worktree, idempotently, from whatever an interrupted creation left."""
+        record = project["artifacts_branch"]
+        source, path, name = Path(record["source"]), Path(record["path"]), record["branch"]
+        if common_dir(source) != Path(record["common_dir"]):
+            raise ProjectError(f"Artifacts repository identity changed: {source}")
+        if not inside(path, self.worktrees):
+            raise ProjectError(f"Unsafe artifacts worktree path: {path}")
+        with self.repo_lock(self.artifacts_repository(record)):
+            if path.exists() or path.is_symlink():
+                if (path.is_symlink() or common_dir(path) != Path(record["common_dir"])
+                        or Path(git(path, "rev-parse", "--show-toplevel")).resolve() != path.resolve()
+                        or branch(path) != name):
+                    raise ProjectError(f"Artifacts worktree path holds something other than branch {name}: {path}")
+                return
+            existing = git(source, "rev-parse", "--verify", f"refs/heads/{name}", check=False)
+            if existing and existing != record["base_sha"]:
+                raise ProjectError(f"Interrupted creation artifacts branch {name} has unexpected commits; "
+                                   "it has no worktree, so inspect it in the artifacts repository.")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if existing:
+                git(source, "worktree", "add", str(path), name)
+            else:
+                git(source, "worktree", "add", "--no-track", "-b", name, str(path), record["base_sha"])
+
+    def check_fresh_artifacts(self, directory: Path) -> None:
         """A new UUID must never adopt another project's directory."""
-        directory = self.artifact_directory(project)
         if directory.exists() or directory.is_symlink():
             raise ProjectError(f"Artifact destination already exists: {directory}; retry creation for a new UUID.")
         root = self.artifacts_git(directory)
@@ -113,6 +177,8 @@ class LifecycleMixin(ManagerCore):
             git(coordinator, "switch", "-c", project["branch"])
         elif branch(coordinator) != project["branch"]:
             raise ProjectError("Coordinator branch changed during creation.")
+        if project.get("artifacts_branch"):
+            self.ensure_artifacts_worktree(project)
         self.initialize_blackboard(project)
         if project.get("follow_up_from"):
             self.finish_follow_up_context(project)
