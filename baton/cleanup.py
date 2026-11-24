@@ -395,7 +395,7 @@ class CleanupMixin(ForceCleanupMixin):
             if not sealed or not self.is_ancestor(shared, sealed, "HEAD"):
                 raise ProjectError(f"{final} already exists in the shared artifacts checkout; the merged artifacts "
                                    "branch needs that directory. Ask the user to move it before cleanup.")
-            changed = local_changes(shared, str(final.relative_to(shared)))
+            changed = local_changes(shared, str(final.resolve().relative_to(shared.resolve())))
             if changed:
                 raise ProjectError(f"{final} has local changes in the shared artifacts checkout "
                                    f"({self.summarize(changed)}); ask the user to resolve them before cleanup.")
@@ -435,7 +435,7 @@ class CleanupMixin(ForceCleanupMixin):
                 raise ProjectError(f"The shared artifacts checkout {shared} cannot take the merged artifacts branch "
                                    "(see above); every worktree is intact. Ask the user to resolve that, then rerun "
                                    "cleanup.")
-            changed = local_changes(shared, str(final.relative_to(shared)))
+            changed = local_changes(shared, str(final.resolve().relative_to(shared.resolve())))
             if changed:
                 raise ProjectError(f"{final} has local changes in the shared artifacts checkout "
                                    f"({self.summarize(changed)}); every worktree is intact. Ask the user to resolve "
