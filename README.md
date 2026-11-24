@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://www.python.org/downloads/"><img alt="Python 3.13+" src="https://img.shields.io/badge/python-3.13%2B-blue"></a>
-  <img alt="Runtime dependencies: none" src="https://img.shields.io/badge/runtime%20deps-none-brightgreen">
+  <img alt="Python runtime dependencies: none" src="https://img.shields.io/badge/python%20runtime%20deps-none-brightgreen">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green"></a>
 </p>
 
@@ -17,7 +17,8 @@ agents at once. It manages Git worktrees for each participating repository, keep
 plans, reviews, and retrospectives in a shared artifact checkout, and gives
 coordinating agents a shared blackboard and task list with ownership rules.
 Codex, Claude Code, Antigravity, and Cursor are built-in providers: any of them can
-own a project, and they run the review and retrospective workflows. The runtime uses only the Python standard library.
+own a project, and they run the review and retrospective workflows. The Python runtime uses only the standard
+library; the optional web UI ships two vendored browser libraries (see [Web UI](docs/web.md)).
 
 ## Operating principles
 
@@ -111,6 +112,18 @@ first recorded repository source checkout and keeps the project closed.
 See [Project discovery](docs/projects.md#project-discovery) for coverage and
 [Sessions and ownership](docs/projects.md#sessions-and-ownership) for fork behavior.
 
+## Browse projects in a web UI
+
+`baton web` serves a local, read-only UI on `127.0.0.1` until Ctrl-C: slots and
+archived projects, per-project status, artifacts with rendered Markdown and Mermaid
+diagrams, the live board and tasks, review runs, search and pull request state.
+
+```sh
+baton web --port 0 --open
+```
+
+See [Web UI](docs/web.md) for the views and the safety model.
+
 ## Concepts
 
 - **Coordinator slot**: a metadata-only checkout of the coordinator repository that
@@ -142,6 +155,7 @@ preferences are described in [Configuration](docs/configuration.md). The bundled
 - [Blackboard and tasks](docs/blackboard-and-tasks.md): SQLite board, tasks, export, sealing
 - [Retrospectives](docs/retrospectives.md): interactive and unattended retros, plus weekly cross-project reports
 - [Google Doc archives](docs/gdoc.md): share an artifact as a Google Doc and pull it back into Git
+- [Web UI](docs/web.md): `baton web`, a local read-only browser for projects and artifacts
 - [Changelog](CHANGELOG.md): changes and supported formats
 
 ## Development

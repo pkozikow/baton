@@ -2,7 +2,8 @@
 
 import contextlib
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import stat
 import subprocess
 import sys
 import time
@@ -19,6 +20,43 @@ from .core import ManagerCore
 
 def unsafe_artifact_path(path: Path) -> bool:
     return not path.is_absolute() or any(parent.is_symlink() for parent in (path, *path.parents))
+
+
+class NonRegularArtifact(OSError):
+    pass
+
+
+def open_artifact(root: Path, relative: PurePosixPath) -> int:
+    """Open a file or directory beneath root, refusing a symlink at every component; returns the descriptor."""
+    if relative.is_absolute() or any(part in ("", ".", "..") for part in relative.parts):
+        raise ValueError(f"Unsafe artifact path: {relative}")
+    # O_NONBLOCK keeps a FIFO from blocking the open; callers reject non-regular files by type.
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    descriptor = os.open(root, flags | os.O_DIRECTORY)
+    try:
+        for part in relative.parts:
+            child = os.open(part, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def read_artifact(root: Path, relative: PurePosixPath, limit: int | None = None) -> bytes:
+    """A regular file's bytes, read through open_artifact; with a limit, at most limit + 1 bytes."""
+    descriptor = open_artifact(root, relative)
+    try:
+        # fdopen() refuses a directory without closing the descriptor it was given.
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise NonRegularArtifact(f"Not a regular file: {root / relative}")
+        stream = os.fdopen(descriptor, "rb")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    with stream:
+        return stream.read() if limit is None else stream.read(limit + 1)
 
 
 class ArtifactsMixin(ManagerCore):

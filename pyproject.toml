@@ -9,7 +9,7 @@ description = "Multi-repository project worktrees, agent coordination, and revie
 readme = "README.md"
 requires-python = ">=3.13"
 license = "MIT"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "baton/web/static/vendor/*.LICENSE.txt"]
 authors = [{ name = "Piotr Kozikowski" }]
 dependencies = []
 
@@ -43,5 +43,5 @@ packages = ["baton"]
 "agent-skills/baton-workflow" = "baton/skills/baton-workflow"
 
 [tool.hatch.build.targets.sdist]
-include = ["baton", "blackboard.py", "agent-skills", "bin", "tests", "run_tests.py", "check_ci_reports.py", "install.sh", "README.md", "AGENTS.md", "CHANGELOG.md", "LICENSE", "docs", "pyproject.toml", "hatch_build.py", "uv.lock"]
+include = ["baton", "blackboard.py", "agent-skills", "bin", "tests", "run_tests.py", "check_ci_reports.py", "install.sh", "README.md", "AGENTS.md", "CHANGELOG.md", "LICENSE", "THIRD_PARTY_NOTICES.md", "docs", "pyproject.toml", "hatch_build.py", "uv.lock"]
 exclude = ["agent-skills/tests", "**/__pycache__", "experiments"]

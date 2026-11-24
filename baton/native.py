@@ -15,7 +15,10 @@ from .manifest import entries, stack_records, entry_stack_root, stack_scope
 
 
 def github_repository(source: Path) -> str | None:
-    remote = git(source, "config", "--get", "remote.origin.url", check=False)
+    return github_repository_for_remote(git(source, "config", "--get", "remote.origin.url", check=False))
+
+
+def github_repository_for_remote(remote: str) -> str | None:
     match = re.fullmatch(r"(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([\w.-]+/[\w.-]+?)(?:\.git)?/?", remote)
     return f"github.com/{match.group(1)}" if match else None
 

@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- `baton web [--port PORT] [--open]` serves a local, read-only web UI on
+  `127.0.0.1` until Ctrl-C: coordinator slots and archived projects, per-project
+  status, the artifact directory with Markdown and Mermaid diagrams rendered in the
+  browser, the live board and tasks, review runs, search, and pull request state
+  looked up with `gh` on demand. It never writes to the registry, artifacts,
+  boards, Git or GitHub, and never initializes or repairs the registry. Requests
+  from foreign hosts or other sites are refused and every page carries a strict
+  Content Security Policy. See [Web UI](docs/web.md).
+- The package now vendors two browser libraries for the web UI, markdown-it
+  15.0.3 and Mermaid 11.17.2 (MIT, with permissively licensed bundled packages),
+  with their license texts and a new `THIRD_PARTY_NOTICES.md`. The Python runtime
+  still has no dependencies. The wheel grows by about 1 MB compressed (3.8 MB
+  installed), almost all of it Mermaid.
+- `baton search` and the web UI read artifacts through one shared reader that
+  opens every path component without following symlinks.
+
 - `baton gdoc` links a Markdown artifact to a Google Doc, which then owns its
   text. `link PATH DOC_URL` adopts an existing Doc and `link PATH` creates one;
   `pull` exports linked Docs into their Markdown files and commits them, one
