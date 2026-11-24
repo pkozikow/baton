@@ -699,9 +699,10 @@ class ArtifactsMixin(ManagerCore):
         # A concurrent publisher of the same commit, or a merge whose response was lost, still published it.
         if not (self.fetch_artifacts(root, default) and self.is_ancestor(root, sha, upstream)):
             self.artifact_warning(root, default, (
-                f"Pull request publication of {sha[:12]} from {name} failed; the commits stay local and the next "
-                f"artifact commit retries. {failure}" if failure else
-                f"Merged {name}, but {sha[:12]} is not yet in origin/{default}; the next artifact commit checks again."))
+                # Worded for both callers: an artifact commit and a project's cleanup.
+                f"Pull request publication of {sha[:12]} from {name} failed; nothing was merged, and running the "
+                f"command again retries. {failure}" if failure else
+                f"Merged {name}, but {sha[:12]} is not yet in origin/{default}; running the command again checks."))
             return False
         print(f"Published {sha[:12]} to origin/{default} through a pull request from {name}.", flush=True)
         if not keep_branch:
