@@ -230,8 +230,10 @@ class DedicatedArtifactsTest(DedicatedFixture):
         directory = Path(project["artifacts_path"])
         (directory / "plan.md").write_text("Plan\n")
         self.commit(directory / "plan.md", "Add plan")
-        # With the setting on, the commit reaches origin/main through a merged pull request.
-        self.assertEqual(self.git(self.artifacts, "log", "-1", "--no-merges", "--format=%s"), "Add plan")
+        # With the setting on, the commit reaches origin/main through a merged pull request: it is the merge's
+        # second parent. (Not `log --no-merges`, whose order is arbitrary for commits made in the same second.)
+        self.assertEqual(self.git(self.artifacts, "log", "-1", "--format=%s", "HEAD^2"), "Add plan")
+        self.assertEqual(self.git(self.artifacts, "rev-parse", "HEAD"), self.git(self.origin, "rev-parse", "main"))
 
     def test_refused_without_a_github_origin(self) -> None:
         self.git(self.artifacts, "remote", "set-url", "origin", str(self.origin))

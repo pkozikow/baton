@@ -1105,7 +1105,8 @@ class SharedCheckoutPullRequestGdocTest(unittest.TestCase):
     def assert_published(self, message: str, count: int) -> None:
         prs = json.loads(self.pull_requests.read_text())
         self.assertEqual([pr["state"] for pr in prs], ["MERGED"] * count)
-        self.assertEqual(self.git(self.artifacts, "log", "-1", "--no-merges", "--format=%s"), message)
+        # The published commit is the merge's second parent; `log --no-merges` orders same-second commits arbitrarily.
+        self.assertEqual(self.git(self.artifacts, "log", "-1", "--format=%s", "HEAD^2"), message)
         self.assertEqual(self.git(self.artifacts, "rev-parse", "HEAD"), self.git(self.origin, "rev-parse", "main"))
         self.git(self.origin, "merge-base", "--is-ancestor", self.upstream, "main")
         self.assertEqual(self.git(self.artifacts, "status", "--porcelain"), "")
