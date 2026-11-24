@@ -60,7 +60,9 @@ class LifecycleMixin(ManagerCore):
         if any(name in (p["name"], p.get("pending_rename", {}).get("name"), *p.get("previous_names", []))
                and p["slot"] != slot for p in self.state["projects"].values()):
             raise ProjectError(f"Project already active or a former name of one: {name}")
-        project = {"name": name, "slot": slot, "branch": f"{self.branch_prefix}/{name}", "branch_prefix": self.branch_prefix, "state": "creating", "repos": [],
+        if not existing or existing["branch"] != name:
+            self.check_coordinator_branch_available(name)
+        project = {"name": name, "slot": slot, "branch": name, "branch_prefix": self.branch_prefix, "state": "creating", "repos": [],
                    "requested": repos, "uuid": uuid.uuid4().hex, "owner": None}
         project["artifacts_path"] = str(self.artifacts / f"{name}-{project['uuid'][:8]}")
         if self.dedicated_artifacts_branch:
@@ -75,11 +77,11 @@ class LifecycleMixin(ManagerCore):
             self.preflight_follow_up(project, final)
         self.check_fresh_artifacts(final)
         record = project.get("artifacts_branch")
-        artifact_claims = {("artifacts", project["artifacts_path"]), ("artifacts", str(final))}
+        claims = {("name", name), ("coordinator", name.casefold()), ("artifacts", project["artifacts_path"]), ("artifacts", str(final))}
         if record:
-            artifact_claims |= entry_claims(record["common_dir"], record["branch"], record["path"])
-        self.reserve({("name", name)} | artifact_claims | set().union(*(entry_claims(r["common_dir"], r["branch"], r["path"])
-                                                      for r in self.resolve_repos(repos, project, existing))))
+            claims |= entry_claims(record["common_dir"], record["branch"], record["path"])
+        self.reserve(claims | set().union(*(entry_claims(r["common_dir"], r["branch"], r["path"])
+                                          for r in self.resolve_repos(repos, project, existing))))
         if existing:
             if not sys.stdin.isatty():
                 raise ProjectError(f"Slot {slot} is occupied by {existing['name']}; interactive confirmation is required, or run cleanup explicitly.")
@@ -94,8 +96,6 @@ class LifecycleMixin(ManagerCore):
             if sys.stdin.readline().strip().lower() not in ("y", "yes"):
                 raise ProjectError("Replacement cancelled; existing project unchanged.")
         self.check_coordinator(existing or project, idle=existing is None, allow_dirty=existing is not None)
-        if (not existing or existing["branch"] != project["branch"]) and git(self.repo, "rev-parse", "--verify", f"refs/heads/{project['branch']}", check=False):
-            raise ProjectError(f"Coordinator branch already exists: {project['branch']}")
         project["repos"] = self.prepare(repos, project, replacing=existing)
         if record:
             with self.repo_lock(self.artifacts_repository(record)):

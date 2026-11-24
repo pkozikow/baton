@@ -78,7 +78,7 @@ class ProjectBranchesTest(unittest.TestCase):
         self.assertFalse(old.exists())
         self.git(source, "show-ref", "--verify", "refs/heads/baton/example", ok=False)
         self.assertEqual(self.catalog(source)["stacks"], [])
-        self.assertEqual(self.git(self.slots / "p3", "branch", "--show-current"), "baton/example")
+        self.assertEqual(self.git(self.slots / "p3", "branch", "--show-current"), "example")
         self.assertEqual({p.name for p in (self.slots / "p3" / "repos").iterdir()}, {"alpha--api"})
         self.assertEqual((self.slots / "p3" / "repos" / "alpha--api").resolve(), first)
         self.assertEqual(self.cli("path", "p3", "alpha").stdout.strip(), str(first))

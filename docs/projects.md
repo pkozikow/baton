@@ -92,8 +92,9 @@ Existing project-scoped commands retain their `--selector` support. Global
 
 ## Coordinator slots
 
-Coordinator slots and their idle branches are `p1` through `p10`; these names are
-also reserved as project names. `baton list` always shows those ten slots. Historical
+Coordinator slots and their idle branches are `p1` through `p10`. Active slots
+use the project name as their local coordinator branch. `main` and the slot
+names are reserved. `baton list` always shows those ten slots. Historical
 archives keep their original metadata and remain selectable by project UUID or
 unambiguous project name.
 
@@ -135,7 +136,7 @@ then owns its text and `baton gdoc pull` commits it back as an archive.
 
 ## Branches and coordinator links
 
-New projects use `<branch-prefix>/<project>` branches (see
+New projects use `<branch-prefix>/<project>` branches in participating repositories (see
 [Branch prefix](configuration.md#branch-prefix)); existing source checkouts stay on
 their current branches. Only the project parent changes branch topology or publishes native
 stacks; use the bundled planning skill's multi-branch reference for coordination
