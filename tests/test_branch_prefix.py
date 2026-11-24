@@ -47,6 +47,7 @@ class BranchPrefixIntegrationTest(unittest.TestCase):
         configured = self.configure("team/feature/")
         self.assertEqual(configured["branch_prefix"], "team/feature")
         self.create("alpha")
+        self.assertEqual(self.git(self.slots / "p3", "branch", "--show-current"), "example")
         self.assertEqual(self.git(self.checkout("alpha"), "branch", "--show-current"), "team/feature/example")
         self.configure("different")
         self.cli("branch", "init", "alpha", "api", cwd=self.slots / "p3")
@@ -72,6 +73,16 @@ class BranchPrefixIntegrationTest(unittest.TestCase):
         self.assertIn("subplan", refused.stderr)
         self.cli("cleanup", "p3")
         self.assertFalse(child.exists())
+
+    def test_coordinator_ref_conflicts_are_rejected_before_project_creation(self) -> None:
+        self.make_repo("alpha")
+        self.git(self.projects, "branch", "conflict/child", "main")
+        for name in ("main", "P3", "HEAD", "Conflict"):
+            with self.subTest(name=name):
+                self.cli("create", name, "--selector", "p3", "--repos", "alpha", ok=False)
+                self.assertFalse(fixtures.state_file(self.projects).exists())
+                self.assertEqual(self.git(self.slots / "p3", "branch", "--show-current"), "p3")
+                self.assertFalse(self.checkout("alpha", name).exists())
 
 
     def test_invalid_prefix_is_not_saved(self) -> None:

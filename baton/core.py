@@ -15,7 +15,7 @@ from .doctor_freshness import require_trusted_runtime
 from .configuration import REPOSITORY_NAME_PATTERN, effective_paths, read_config, configured_branch_prefix
 from .errors import ProjectError, NoProject
 from .gitutil import git, common_dir, branch, write_json, file_lock, inside
-from .manifest import MEMBER_NAME_PATTERN, project_entries, entry_claims, project_claims, claim_conflict, managed_links, link_name, member_name, branch_suffix
+from .manifest import MEMBER_NAME_PATTERN, project_entries, entry_claims, project_claims, claim_conflict, managed_links, link_name, member_name, branch_suffix, project_code_branch
 from .native import native, native_lock
 from .slots import SLOT_NAMES, read_active_project
 from .storage_names import registry_directory
@@ -284,7 +284,7 @@ class ManagerCore:
                     f"- Coordinator slots: `{self.slots}/p1` through `p10`.\n"
                     f"- Code worktrees: `{self.worktrees}/<repo>/<project>`.\n"
                     "- Idle slots use branches p1 through p10. Active slots use "
-                    f"{self.branch_prefix}/<project>, containing a project.json manifest and ignored "
+                    "<project>, containing a project.json manifest and ignored "
                     "repos/ symlinks to participating checkouts.\n"
                     "- Durable operation state and archived manifests live in "
                     "the common Git directory under baton/.\n\n"
@@ -447,13 +447,14 @@ class ManagerCore:
                                name: str) -> tuple[str, Path]:
         if not re.fullmatch(MEMBER_NAME_PATTERN, name):
             raise ProjectError("Use a simple member slug containing letters/digits/dashes/underscores.")
-        target = f"{project['branch']}--{name}"
+        target = f"{project_code_branch(project)}--{name}"
         return target, self.worktrees / repo_id / branch_suffix(target, project["branch_prefix"])
 
     def resolve_repos(self, names: list[str], project: dict[str, Any],
                       replacing: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         """Validate repository arguments locally, without fetching."""
         prepared: list[dict[str, Any]] = []
+        code_branch = project_code_branch(project)
         for name in names:
             supplied = Path(self.resolve_repo(name)).expanduser()
             source = (supplied if supplied.is_absolute() else self.sources / supplied).resolve()
@@ -470,19 +471,29 @@ class ManagerCore:
             historical_links.update(f"{r['id']}--{member_name(r)}" for r in project["repos"] if member_name(r))
             if repo_id in managed_links(project) or repo_id in historical_links:
                 raise ProjectError(f"Repository name collides with a member link: {repo_id}")
-            path = self.worktrees / repo_id / branch_suffix(project["branch"], project["branch_prefix"])
+            path = self.worktrees / repo_id / project["name"]
             owned = replacing is not None and any(
-                r["common_dir"] == identity and r["path"] == str(path) and r["branch"] == project["branch"]
+                r["common_dir"] == identity and r["path"] == str(path) and r["branch"] == code_branch
                 for r in replacing["repos"]
             )
             if (path.exists() or path.is_symlink()) and not owned:
                 raise ProjectError(f"Worktree path already exists: {path}")
-            if not owned and git(root, "rev-parse", "--verify", f"refs/heads/{project['branch']}", check=False):
-                raise ProjectError(f"Branch already exists in {root}: {project['branch']}")
+            if not owned and git(root, "rev-parse", "--verify", f"refs/heads/{code_branch}", check=False):
+                raise ProjectError(f"Branch already exists in {root}: {code_branch}")
             prepared.append({"id": repo_id, "source": str(root), "common_dir": identity,
-                             "path": str(path), "branch": project["branch"],
+                             "path": str(path), "branch": code_branch,
                              "branch_prefix": project["branch_prefix"]})
         return prepared
+
+    def check_coordinator_branch_available(self, name: str) -> None:
+        key = name.casefold()
+        if key in ("main", *SLOT_NAMES):
+            raise ProjectError(f"Coordinator branch name is reserved: {name}")
+        git(self.repo, "check-ref-format", "--branch", name)
+        for existing in git(self.repo, "for-each-ref", "--format=%(refname:strip=2)", "refs/heads").splitlines():
+            ref = existing.casefold()
+            if ref == key or ref.startswith(key + "/") or key.startswith(ref + "/"):
+                raise ProjectError(f"Coordinator branch already exists or conflicts with {name}: {existing}")
 
     def check_coordinator(self, project: dict[str, Any], idle: bool = False, allow_dirty: bool = False) -> Path:
         path = self.slots / project["slot"]

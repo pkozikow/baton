@@ -6,7 +6,7 @@ import re
 
 from .errors import ProjectError
 from .gitutil import git, common_dir, branch, inside
-from .manifest import entries, member_name, stack_records, entry_claims
+from .manifest import entries, member_name, stack_records, entry_claims, project_code_branch
 from .native import registered_stacks
 from .core import ManagerCore
 from .slots import SLOT_NAMES
@@ -40,14 +40,16 @@ class RenameMixin(ManagerCore):
                             *(p.get("previous_names", []) if p is not project else []))
                    for p in self.state["projects"].values()):
                 raise ProjectError(f"Project already active or a former name of one: {name}")
+            repo_branch = project_code_branch(project, name)
             self.reserve({("name", name)} | set().union(*(
-                entry_claims(r["common_dir"], f"{project['branch'].rsplit('/', 1)[0]}/{name}", str(self.worktrees / r["id"] / name)) for r in project["repos"])))
+                entry_claims(r["common_dir"], repo_branch, str(self.worktrees / r["id"] / name)) for r in project["repos"])))
             self.check_coordinator(project)
             for repo in project["repos"]:
                 self.validate_clean_repo(repo, allow_dirty=True)
             artifact_path = self.artifact_directory(project)
             artifact_stat = artifact_path.stat() if artifact_path.exists() else None
-            pending = {"name": name, "old_name": project["name"], "branch": f"{project['branch'].rsplit('/', 1)[0]}/{name}",
+            pending = {"name": name, "old_name": project["name"], "branch": name,
+                       "repo_branch": repo_branch, "old_repo_branch": project_code_branch(project),
                        "old_branch": project["branch"], "artifacts": str(artifact_path),
                        "had_artifacts": artifact_path.exists(),
                        "artifact_identity": [artifact_stat.st_dev, artifact_stat.st_ino] if artifact_stat else None,
@@ -56,11 +58,13 @@ class RenameMixin(ManagerCore):
                                  for r in project["repos"]]}
 
         old_branch, new_branch = pending["old_branch"], pending["branch"]
+        old_repo_branch = pending.get("old_repo_branch", old_branch)
+        new_repo_branch = pending.get("repo_branch", new_branch)
         # Validate every destination before starting, and revalidate journaled paths on resume.
         if common_dir(coordinator) != common_dir(self.repo) or branch(coordinator) not in (old_branch, new_branch):
             raise ProjectError("Coordinator identity or branch changed during rename.")
-        if branch(coordinator) == old_branch and git(coordinator, "rev-parse", "--verify", f"refs/heads/{new_branch}", check=False):
-            raise ProjectError(f"Branch already exists: {new_branch}")
+        if branch(coordinator) == old_branch:
+            self.check_coordinator_branch_available(new_branch)
         links = coordinator / "repos"
         if not links.is_dir() or links.is_symlink():
             raise ProjectError(f"Unexpected coordinator repos directory: {links}")
@@ -80,10 +84,10 @@ class RenameMixin(ManagerCore):
             if Path(git(current, "rev-parse", "--show-toplevel")).resolve() != current.resolve():
                 raise ProjectError(f"Not an exact worktree root: {current}")
             current_branch = branch(current)
-            if current_branch not in (old_branch, new_branch):
+            if current_branch not in (old_repo_branch, new_repo_branch):
                 raise ProjectError(f"Unexpected branch at {current}")
-            if current_branch == old_branch and git(source, "rev-parse", "--verify", f"refs/heads/{new_branch}", check=False):
-                raise ProjectError(f"Branch already exists in {repo['id']}: {new_branch}")
+            if current_branch == old_repo_branch and git(source, "rev-parse", "--verify", f"refs/heads/{new_repo_branch}", check=False):
+                raise ProjectError(f"Branch already exists in {repo['id']}: {new_repo_branch}")
             link = links / repo["id"]
             if not link.is_symlink() and not (project.get("pending_rename") and not link.exists()):
                 raise ProjectError(f"Unexpected managed link: {link}")
@@ -107,8 +111,8 @@ class RenameMixin(ManagerCore):
             old, new = Path(repo["old"]), Path(repo["new"])
             current = old if old.exists() else new
             with self.repo_lock(repo):
-                if branch(current) == old_branch:
-                    git(current, "branch", "-m", new_branch)
+                if branch(current) == old_repo_branch:
+                    git(current, "branch", "-m", new_repo_branch)
                 if old.exists():
                     git(Path(repo["source"]), "worktree", "move", str(old), str(new))
             link = links / repo["id"]
@@ -130,7 +134,7 @@ class RenameMixin(ManagerCore):
         project.update(name=name, branch=new_branch,
                        previous_names=[alias for i, alias in enumerate(aliases) if alias != name and alias not in aliases[:i]])
         for repo, move in zip(project["repos"], pending["repos"]):
-            repo.update(branch=new_branch, path=move["new"])
+            repo.update(branch=new_repo_branch, path=move["new"])
         self.save()
         self.materialize(project)
         project.pop("pending_rename")

@@ -49,6 +49,10 @@ def branch_suffix(branch: str, prefix: str | None = None) -> str:
     return branch.removeprefix(prefix + "/")
 
 
+def project_code_branch(project: dict[str, Any], name: str | None = None) -> str:
+    return f"{project['branch_prefix']}/{project['name'] if name is None else name}"
+
+
 
 def subplan_directory(project_directory: Path, repo: str, branch: str, prefix: str | None = None) -> Path:
     return project_directory / "branches" / repo / branch_suffix(branch, prefix)
@@ -94,7 +98,7 @@ def project_claims(project: dict[str, Any]) -> set[tuple[str, ...]]:
     for entry in project_entries(project, include_retired=True):
         claims |= entry_claims(entry["common_dir"], entry["branch"], entry["path"])
     for move in rename.get("repos", []):
-        claims |= entry_claims(move["common_dir"], rename["branch"], move["new"])
+        claims |= entry_claims(move["common_dir"], rename.get("repo_branch", rename["branch"]), move["new"])
     for pending in (project.get("pending_member"),):
         if not pending:
             continue
