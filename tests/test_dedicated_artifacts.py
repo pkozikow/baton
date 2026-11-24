@@ -567,6 +567,13 @@ class DedicatedCleanupTest(DedicatedFixture):
         refused("Uncommitted files in the artifacts worktree")
         (directory / "draft.md").unlink()
 
+        # Staged only: the index holds an edit while the file itself is back at HEAD.
+        (directory / "plan.md").write_text("Staged plan\n")
+        self.git(worktree, "add", "-A")
+        (directory / "plan.md").write_text("Plan\n")
+        refused("Uncommitted files in the artifacts worktree")
+        self.git(worktree, "reset", "-q", "--hard")
+
         final.mkdir()
         (final / "plan.md").write_text("Local\n")
         refused("already exists in the shared artifacts checkout")
@@ -703,7 +710,8 @@ class DedicatedCleanupTest(DedicatedFixture):
         project, worktree, name, final = self.started()
         self.git(self.artifacts, "worktree", "lock", str(worktree))
         result = self.cli("cleanup", "p3")
-        self.assertIn(f"Leftover (its content is merged; remove it by hand): artifacts worktree {worktree}", result.stderr)
+        self.assertIn(f"Leftover (the sealed commit is merged; check the reason before removing it by hand): "
+                      f"artifacts worktree {worktree}", result.stderr)
         archived = self.archived()
         self.assertEqual(archived["artifacts_path"], str(final))
         self.assertTrue(worktree.is_dir())

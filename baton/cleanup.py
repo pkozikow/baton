@@ -31,8 +31,10 @@ def board_file(relative: PurePosixPath) -> bool:
 def local_changes(root: Path, *paths: str) -> list[str]:
     """Modified, staged, deleted or untracked non-ignored paths of a checkout, optionally limited to paths."""
     changed = git(root, "diff", "--name-only", "--no-renames", "-z", "HEAD", "--", *paths).split("\0")
+    # The index on its own: a staged edit whose file was put back to HEAD shows in neither other listing.
+    staged = git(root, "diff", "--cached", "--name-only", "--no-renames", "-z", "HEAD", "--", *paths).split("\0")
     untracked = git(root, "ls-files", "--others", "--exclude-standard", "-z", "--", *paths).split("\0")
-    return sorted(set(filter(None, changed + untracked)))
+    return sorted(set(filter(None, changed + staged + untracked)))
 
 
 def unarchived_notes(worktree: Path, archive: Path) -> list[str]:
@@ -480,4 +482,6 @@ class CleanupMixin(ForceCleanupMixin):
         if sealed and not self.delete_remote_branch(shared, name, sealed):
             leftovers.append(f"remote branch origin/{name}")
         for leftover in leftovers:
-            print(f"Leftover (its content is merged; remove it by hand): {leftover}", file=sys.stderr)
+            # Not "its content is merged": a worktree Git refuses to remove may hold changes made after sealing.
+            print(f"Leftover (the sealed commit is merged; check the reason before removing it by hand): {leftover}",
+                  file=sys.stderr)
