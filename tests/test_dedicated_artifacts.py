@@ -20,6 +20,7 @@ from baton.retro_summary import run_summary
 
 import test_project_manager as fixtures
 import test_project_retirement as retirement_fixtures
+import test_web as web_fixtures
 from test_project_manager import read_state, state_file
 
 
@@ -186,6 +187,38 @@ class DedicatedArtifactsTest(DedicatedFixture):
         self.assertEqual(self.shared(), shared)
         self.assertFalse(Path(record["final_path"]).exists())
         self.git(self.origin, "rev-parse", "--verify", f"refs/heads/{record['branch']}", ok=False)
+
+    serve = web_fixtures.WebTest.serve
+    request = web_fixtures.WebTest.request
+    page = web_fixtures.WebTest.page
+
+    def test_open_plan_search_and_the_web_ui_read_the_artifacts_branch(self) -> None:
+        self.create("alpha")
+        project = self.project()
+        worktree = Path(project["artifacts_branch"]["path"])
+        plan = self.write_plan("Branch-only plan text\n")
+        self.assertIn(worktree, plan.parents)
+        self.assertFalse(Path(project["artifacts_branch"]["final_path"]).exists())
+
+        capture = self.root / "editor-arguments.json"
+        editor = self.root / "bin" / "record-editor"
+        editor.write_text("#!/bin/sh\nprintf '%s' \"$1\" > " + shlex.quote(str(capture)) + "\n")
+        editor.chmod(0o755)
+        self.env["EDITOR"] = str(editor)
+        self.cli("open-plan", cwd=self.slots / "p3")
+        self.assertEqual(capture.read_text(), str(plan))
+
+        found = json.loads(self.cli("search", "Branch-only plan text", "--json", cwd=self.root).stdout)["results"]
+        self.assertEqual([result["uuid"] for result in found], [project["uuid"]])
+        self.assertEqual(found[0]["master_path"], str(plan))
+
+        # Unsaved review runs are discovered in TMPDIR; never let the developer's real runs appear.
+        self.env["TMPDIR"] = str(self.root)
+        self.port = 0
+        self.serve()
+        self.assertIn("Branch-only plan text", self.page(f"/project/{project['uuid']}/files/plan.md"))
+        self.assertIn(f'href="/project/{project["uuid"]}/files/plan.md"', self.page("/search?q=%22Branch-only+plan+text%22"))
+        self.assertIn(f'href="/project/{project["uuid"]}/files/plan.md"', self.page(f"/project/{project['uuid']}"))
 
     def test_projects_without_the_record_keep_the_shared_checkout(self) -> None:
         self.cli("config", "set", "--no-dedicated-artifacts-branch")
