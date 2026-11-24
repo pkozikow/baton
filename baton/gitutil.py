@@ -94,6 +94,12 @@ def inside(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
 
 
+def worktree_on_branch(path: Path, common: Path, name: str) -> bool:
+    """Whether path is the root of a worktree of that repository, checked out on that branch."""
+    return (not path.is_symlink() and path.is_dir() and common_dir(path) == common
+            and Path(git(path, "rev-parse", "--show-toplevel")).resolve() == path.resolve() and branch(path) == name)
+
+
 def require_agent_write_path(path: Path) -> None:
     resolved = path.resolve()
     if any(part.casefold() == ".git" for candidate in (path, resolved) for part in candidate.parts):

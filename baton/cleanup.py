@@ -10,19 +10,16 @@ import uuid
 from typing import Any
 
 from .errors import ProjectError
-from .gitutil import git, common_dir, branch, inside
+from .artifacts import EVIDENCE_FILES
+from .gitutil import git, common_dir, branch, inside, worktree_on_branch
 from .manifest import (entries, member_name, stack_records, ensure_stack_records, stack_scope,
-                       project_entries, managed_links, stack_worktree, note_directories)
+                       project_entries, managed_links, stack_worktree, note_directories, artifacts_repository)
 from .native import merged_pr, registered_stacks, integrated_stack, native_lock, github_repository
 from .force_cleanup import ForceCleanupMixin
 
 
 # Worktree-relative paths the retro reviewed and deliberately did not archive (irrelevant or older conflicting copies).
 ARCHIVE_SKIPPED = "archive-skipped.txt"
-
-
-# The four sealed coordination files preserve_blackboard exports and commits.
-EVIDENCE_FILES = ("board.sqlite", "overview.md", "history.md", "manifest.json")
 
 
 def board_file(relative: PurePosixPath) -> bool:
@@ -340,9 +337,9 @@ class CleanupMixin(ForceCleanupMixin):
         record = project["artifacts_branch"]
         if common_dir(shared) != Path(record["common_dir"]):
             raise ProjectError(f"Artifacts repository identity changed: {shared}")
-        if (worktree.is_symlink() or not worktree.is_dir() or common_dir(worktree) != Path(record["common_dir"])
-                or Path(git(worktree, "rev-parse", "--show-toplevel")).resolve() != worktree.resolve()
-                or branch(worktree) != name):
+        if shared not in final.parents:
+            raise ProjectError(f"The recorded final directory {final} is not inside the shared artifacts checkout {shared}.")
+        if not worktree_on_branch(worktree, Path(record["common_dir"]), name):
             raise ProjectError(f"The artifacts worktree {worktree} is missing or not on its branch {name}; "
                                "restore it before cleanup.")
         repository = github_repository(shared)
@@ -360,7 +357,7 @@ class CleanupMixin(ForceCleanupMixin):
                                "merging; ask the user whether to reopen it or keep the branch, then rerun cleanup.")
         tip = git(worktree, "rev-parse", f"refs/heads/{name}")
         base = git(worktree, "merge-base", upstream, tip, check=False)
-        outside = self.non_artifact_paths(worktree, base, tip, artifacts_root=directory) if base else ["(no merge base)"]
+        outside = self.outside_directory(worktree, base, tip, directory) if base else ["(no merge base)"]
         if outside:
             raise ProjectError(f"Artifacts branch {name} changes files outside {directory} "
                                f"({self.summarize(outside)}); cleanup merges only the project's own directory. "
@@ -377,7 +374,7 @@ class CleanupMixin(ForceCleanupMixin):
         head = git(shared, "rev-parse", "HEAD")
         if not self.is_ancestor(shared, head, upstream):
             shared_base = git(shared, "merge-base", upstream, head, check=False)
-            unpublished = (self.non_artifact_paths(shared, shared_base, head, artifacts_root=final.parent)
+            unpublished = (self.outside_directory(shared, shared_base, head, final.parent)
                            if shared_base else ["(no merge base)"])
             if unpublished:
                 raise ProjectError(f"The shared artifacts checkout {shared} has unpublished commits outside "
@@ -392,10 +389,10 @@ class CleanupMixin(ForceCleanupMixin):
         if final.exists() or final.is_symlink():
             sealed = self.sealed_artifacts_tip(project) if project["state"] == "cleaning" else None
             # Present only after a resumed cleanup brought the merged branch into the shared checkout.
-            if not sealed or not self.is_ancestor(shared, sealed, "HEAD"):
+            if final.is_symlink() or not sealed or not self.is_ancestor(shared, sealed, "HEAD"):
                 raise ProjectError(f"{final} already exists in the shared artifacts checkout; the merged artifacts "
                                    "branch needs that directory. Ask the user to move it before cleanup.")
-            changed = local_changes(shared, str(final.resolve().relative_to(shared.resolve())))
+            changed = local_changes(shared, str(final.relative_to(shared)))
             if changed:
                 raise ProjectError(f"{final} has local changes in the shared artifacts checkout "
                                    f"({self.summarize(changed)}); ask the user to resolve them before cleanup.")
@@ -420,7 +417,9 @@ class CleanupMixin(ForceCleanupMixin):
                                        title=f"Archive project {project['name']}",
                                        body=f"Opened by `baton cleanup` for project {project['name']} "
                                             f"({project['uuid']}). It changes only the project's own directory, "
-                                            "and Baton merges it itself."):
+                                            "and Baton merges it itself.",
+                                       # Tidy deletes it once the project is archived.
+                                       keep_branch=True):
             raise ProjectError(f"Merging artifacts branch {name} failed (see above); every worktree is intact. "
                                "Rerun cleanup once the cause is fixed.")
         tip = git(worktree, "rev-parse", "--verify", f"refs/heads/{name}", check=False)
@@ -428,14 +427,15 @@ class CleanupMixin(ForceCleanupMixin):
             raise ProjectError(f"Artifacts branch {name} moved after it was sealed at {sealed[:12]} (now "
                                f"{tip[:12] or 'missing'}); every worktree is intact. Restore the sealed commit, or "
                                "ask the user, before rerunning cleanup.")
-        self.push_artifacts(shared, default, artifacts_root=final.parent, pull_request=True)
+        # The project's record decides this, so turning the setting off mid-project does not strand its cleanup.
+        self.publish_artifacts(shared, default, artifacts_root=final.parent)
         with self.artifacts_lock(shared):
             self.fast_forward_artifacts(shared, default, artifacts_root=final.parent, any_change=True)
             if branch(shared) != default or not self.is_ancestor(shared, sealed, "HEAD"):
                 raise ProjectError(f"The shared artifacts checkout {shared} cannot take the merged artifacts branch "
                                    "(see above); every worktree is intact. Ask the user to resolve that, then rerun "
                                    "cleanup.")
-            changed = local_changes(shared, str(final.resolve().relative_to(shared.resolve())))
+            changed = local_changes(shared, str(final.relative_to(shared)))
             if changed:
                 raise ProjectError(f"{final} has local changes in the shared artifacts checkout "
                                    f"({self.summarize(changed)}); every worktree is intact. Ask the user to resolve "
@@ -447,7 +447,7 @@ class CleanupMixin(ForceCleanupMixin):
         sealed = self.sealed_artifacts_tip(project)
         tracked = sealed and git(shared, "ls-tree", "--name-only", sealed, "--",
                                  str(self.artifact_directory(project).relative_to(worktree)))
-        if tracked and not final.is_dir():
+        if tracked and (final.is_symlink() or not final.is_dir()):
             raise ProjectError(f"{final} is missing from the shared artifacts checkout; the project stays in cleanup "
                                "with its artifacts worktree intact. Restore it and rerun cleanup.")
         project["artifacts_path"] = str(final)
@@ -463,9 +463,11 @@ class CleanupMixin(ForceCleanupMixin):
         """Remove the merged artifacts worktree and branches, best-effort: the project is already archived."""
         worktree, shared, name, _final = self.artifacts_branch_paths(project)
         record = project["artifacts_branch"]
+        # Read before the worktree goes: a project without a board has no recorded sealed commit.
+        sealed = self.sealed_artifacts_tip(project)
         leftovers = []
         try:
-            with self.repo_lock({"common_dir": record["common_dir"], "id": shared.name}):
+            with self.repo_lock(artifacts_repository(record)):
                 if worktree.exists():
                     git(shared, "worktree", "remove", str(worktree))
                 tip = git(shared, "rev-parse", "--verify", f"refs/heads/{name}", check=False)
@@ -475,7 +477,7 @@ class CleanupMixin(ForceCleanupMixin):
                     git(shared, "update-ref", "-d", f"refs/heads/{name}", tip)
         except ProjectError as error:
             leftovers.append(f"artifacts worktree {worktree} or local branch {name} in {shared}: {error}")
-        if not self.delete_remote_branch(shared, name):
+        if sealed and not self.delete_remote_branch(shared, name, sealed):
             leftovers.append(f"remote branch origin/{name}")
         for leftover in leftovers:
             print(f"Leftover (its content is merged; remove it by hand): {leftover}", file=sys.stderr)

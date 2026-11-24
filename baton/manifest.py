@@ -130,6 +130,11 @@ def artifacts_branch_name(project: dict[str, Any], path: Path | None = None) -> 
     return record["branch"] if inside(target, Path(record["path"])) else None
 
 
+def artifacts_repository(record: dict[str, Any]) -> dict[str, Any]:
+    """The fields repo_lock needs, for the artifacts repository that is not a project entry."""
+    return {"common_dir": record["common_dir"], "id": Path(record["source"]).name}
+
+
 def artifacts_final_path(project: dict[str, Any]) -> Path:
     """Where the project's artifacts live once archived: the shared checkout's directory for this project."""
     record = project.get("artifacts_branch")

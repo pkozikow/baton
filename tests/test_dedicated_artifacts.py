@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import unittest
 from unittest import mock
@@ -516,9 +517,14 @@ class DedicatedCleanupTest(DedicatedFixture):
         refused("not on its branch")
         self.git(worktree, "switch", "-q", name)
 
+        # gh lists a fork's branch of the same name too; only the repository's own pull requests count.
+        self.pull_requests.write_text(json.dumps([{
+            "repository": "github.com/example/artifacts", "number": 1, "url": "https://github.com/example/artifacts/pull/1",
+            "state": "CLOSED", "headRefName": name, "headRefOid": "0" * 40, "baseRefName": "main",
+            "isCrossRepository": True}]))
         dry = self.cli("cleanup", "p3", "--dry-run")
         self.assertIn("Would clean", dry.stdout)
-        self.assertEqual(self.prs(), [])
+        self.assertEqual(len(self.prs()), 1)
 
     def test_ignored_files_other_than_the_board_need_confirmation(self) -> None:
         project, worktree, name, final = self.started()
@@ -899,6 +905,46 @@ class SharedCheckoutPublicationTest(DedicatedFixture):
         self.assertTrue(self.publish(directory)["published"])
         self.assertEqual([(pr["baseRefName"], pr["state"]) for pr in self.prs()], [("release", "OPEN"), ("main", "MERGED")])
         self.assertEqual(self.gh_calls("merge")[0][2], "2")
+
+    def test_nothing_to_publish_makes_no_gh_call(self) -> None:
+        directory = self.legacy_project()
+        self.assertTrue(self.publish(directory)["published"])
+        self.assertFalse((self.root / "gh.log").exists())
+
+    def test_an_unusable_gh_leaves_no_branch_on_origin(self) -> None:
+        directory = self.legacy_project()
+        (self.root / "gh-offline").touch()
+        plan = directory / "plan.md"
+        plan.write_text("Plan\n")
+        failed = self.cli("artifacts", "commit", "--selector", "example", "-m", "Add plan", str(plan))
+        self.assertIn("Pull request publication of", failed.stderr)
+        self.assertEqual(self.git(self.origin, "for-each-ref", "--format=%(refname)", "refs/heads"), "refs/heads/main")
+
+    def test_a_publication_branch_moved_after_the_merge_is_not_deleted(self) -> None:
+        directory = self.legacy_project()
+        origin = shlex.quote(str(self.origin))
+        self.after_merge(f"git --git-dir={origin} for-each-ref --format='%(refname)' 'refs/heads/baton/' | "
+                         f"while read ref; do git --git-dir={origin} update-ref \"$ref\" refs/heads/main; done")
+        plan = directory / "plan.md"
+        plan.write_text("Plan\n")
+        result = self.cli("artifacts", "commit", "--selector", "example", "-m", "Add plan", str(plan))
+        commit = self.git(self.artifacts, "rev-parse", "HEAD^2")
+        self.assertIn(f"could not delete origin/baton/artifacts-{commit}", result.stderr)
+        self.merged_into_origin(commit)
+        self.assertEqual(self.git(self.origin, "rev-parse", f"refs/heads/baton/artifacts-{commit}"),
+                         self.git(self.origin, "rev-parse", "main"))
+        self.level()
+
+    def test_the_merge_guard_ignores_symlinks_in_the_checkout(self) -> None:
+        self.legacy_project()
+        self.local_commit("code.py")
+        root = self.artifacts.resolve()
+        (root / "projects" / "everything").symlink_to(root, target_is_directory=True)
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            manager = Manager()
+        # Resolving the link would make the whole checkout the allowed directory.
+        self.assertEqual(manager.non_artifact_paths(root, "HEAD~1", "HEAD", artifacts_root=root / "projects" / "everything"), [])
+        self.assertEqual(manager.outside_directory(root, "HEAD~1", "HEAD", root / "projects" / "everything"), ["code.py"])
 
     def test_retro_summary_reports_published_after_its_pull_request_merges(self) -> None:
         with mock.patch.dict(os.environ, self.env | {"XDG_STATE_HOME": str(self.root / "state")}, clear=True):

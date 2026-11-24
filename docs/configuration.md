@@ -116,10 +116,12 @@ creation: changing the setting later never moves an existing project.
 the shared checkout's default branch: archived projects (unattended retros,
 `artifacts commit`, `review save` or `gdoc` by full UUID), weekly retro summaries,
 and active projects created before the setting was turned on. With the setting on,
-Baton never pushes them to the default branch. It pushes the checkout's `HEAD` to
-`<branch_prefix>/artifacts-<full sha>`, opens a pull request (or reuses an open one
-with the same head commit and base), merges it with a merge commit pinned to that
-commit, deletes the branch, and fast-forwards the checkout. The commit counts as
+Baton never pushes them to the default branch. It first checks that `gh` can list
+the repository's pull requests, so an unusable `gh` leaves nothing on `origin`.
+Then it pushes the checkout's `HEAD` to `<branch_prefix>/artifacts-<full sha>`,
+opens a pull request (or reuses the repository's own open one from that branch
+to the default branch), merges it with a merge commit pinned to that commit,
+deletes the branch if it is still at that commit, and fast-forwards the checkout. The commit counts as
 published once it is an ancestor of `origin/<default>`, even when the
 fast-forward is blocked. Nothing is published while local commits since the merge
 base change files outside the artifacts root. A failure leaves the commits local
@@ -136,6 +138,9 @@ only when the incoming changes are all project artifacts and otherwise warns tha
 fast-forwarding would deploy them. Either way, a checkout that is ahead or
 diverged is not fast-forwarded and Git refuses to overwrite local files. A
 project's own artifacts branch is never fast-forwarded to the default branch.
+The cleanup of a project that has an artifacts branch always publishes through
+pull requests and takes any pure fast-forward, even if the setting was turned
+off after the project was created.
 
 **`gh` under cron.** Unattended retros and `baton retro summarize` run `gh` in the
 Baton process, so `gh` must be authenticated in the cron environment (for example

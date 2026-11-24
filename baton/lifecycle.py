@@ -9,8 +9,8 @@ import uuid
 from typing import Any
 
 from .errors import ProjectError
-from .gitutil import git, common_dir, branch, write_json, inside
-from .manifest import project_entries, entry_claims, managed_links, artifacts_final_path
+from .gitutil import git, common_dir, branch, write_json, inside, worktree_on_branch
+from .manifest import project_entries, entry_claims, managed_links, artifacts_final_path, artifacts_repository
 from .native import github_repository
 from .core import ManagerCore
 from .slots import SLOT_NAMES
@@ -98,7 +98,7 @@ class LifecycleMixin(ManagerCore):
         self.check_coordinator(existing or project, idle=existing is None, allow_dirty=existing is not None)
         project["repos"] = self.prepare(repos, project, replacing=existing)
         if record:
-            with self.repo_lock(self.artifacts_repository(record)):
+            with self.repo_lock(artifacts_repository(record)):
                 record["base_ref"] = self.base(Path(record["source"]), refresh=True)
             record["base_sha"] = git(Path(record["source"]), "rev-parse", record["base_ref"])
         self.check_fresh_artifacts(final)
@@ -133,24 +133,18 @@ class LifecycleMixin(ManagerCore):
             raise ProjectError(f"Artifacts branch already exists in {source}: {project['artifacts_branch']['branch']}; "
                                "retry creation for a new UUID.")
 
-    @staticmethod
-    def artifacts_repository(record: dict[str, Any]) -> dict[str, Any]:
-        """The fields repo_lock needs, for the artifacts repository that is not a project entry."""
-        return {"common_dir": record["common_dir"], "id": Path(record["source"]).name}
-
     def ensure_artifacts_worktree(self, project: dict[str, Any]) -> None:
         """Create the recorded artifacts worktree, idempotently, from whatever an interrupted creation left."""
         record = project["artifacts_branch"]
         source, path, name = Path(record["source"]), Path(record["path"]), record["branch"]
         if common_dir(source) != Path(record["common_dir"]):
             raise ProjectError(f"Artifacts repository identity changed: {source}")
-        if not inside(path, self.worktrees):
+        # Resolved, as for code worktrees: a symlinked parent must not move the worktree out of the managed root.
+        if not inside(path.resolve(), self.worktrees):
             raise ProjectError(f"Unsafe artifacts worktree path: {path}")
-        with self.repo_lock(self.artifacts_repository(record)):
+        with self.repo_lock(artifacts_repository(record)):
             if path.exists() or path.is_symlink():
-                if (path.is_symlink() or common_dir(path) != Path(record["common_dir"])
-                        or Path(git(path, "rev-parse", "--show-toplevel")).resolve() != path.resolve()
-                        or branch(path) != name):
+                if not worktree_on_branch(path, Path(record["common_dir"]), name):
                     raise ProjectError(f"Artifacts worktree path holds something other than branch {name}: {path}")
                 return
             existing = git(source, "rev-parse", "--verify", f"refs/heads/{name}", check=False)

@@ -19,7 +19,12 @@ from .gitutil import git, common_dir, branch, file_lock, inside, require_agent_w
 from .manifest import (project_entries, subplan_directory, coordination_context, artifacts_branch_name,
                        artifacts_final_path)
 from .native import github_repository
+from .slots import read_active_project
 from .core import ManagerCore
+
+
+# The sealed coordination files preserve_blackboard exports and commits.
+EVIDENCE_FILES = ("board.sqlite", "overview.md", "history.md", "manifest.json")
 
 
 def unsafe_artifact_path(path: Path) -> bool:
@@ -142,7 +147,7 @@ class ArtifactsMixin(ManagerCore):
         if not info.get("initialized") and not any((directory / name).exists() or (directory / name).is_symlink() for name in names):
             return
         root = self.artifacts_git(directory)
-        for name in ("board.sqlite", "overview.md", "history.md", "manifest.json"):
+        for name in EVIDENCE_FILES:
             path = directory / "coordination" / name
             if git(root, "check-ignore", "--no-index", "--", str(path), check=False):
                 raise ProjectError(f"Update the artifact checkout .gitignore before cleanup: final coordination evidence must not be ignored: {path}")
@@ -159,7 +164,7 @@ class ArtifactsMixin(ManagerCore):
         directory = self.artifact_directory(project) / "coordination"
         archive = project.get("coordination_archive")
         root = self.artifacts_git(directory)
-        names = ("board.sqlite", "overview.md", "history.md", "manifest.json")
+        names = EVIDENCE_FILES
         relative = [str((directory / name).relative_to(root)) for name in names]
         if archive and not archive.get("uninitialized"):
             if (archive.get("uuid"), archive.get("generation")) != (project["uuid"], info["generation"]) or archive.get("schema_version") != SCHEMA_VERSION:
@@ -272,13 +277,12 @@ class ArtifactsMixin(ManagerCore):
         Cleanup's own seal commits go through preserve_blackboard, not here.
         """
         current = None
-        for path in (self.layout / "projects").glob("*.json"):
-            try:
-                record = json.loads(path.read_text())
-            except FileNotFoundError:
-                continue
-            if record.get("uuid") == project["uuid"]:
-                current = record
+        try:
+            record = read_active_project(self.layout / "projects" / f"{project['slot']}.json")
+        except FileNotFoundError:
+            record = {}
+        if record.get("uuid") == project["uuid"]:
+            current = record
         if current is None:
             current = next((p for p in self.archived_projects() if p["uuid"] == project["uuid"]), project)
         state = "archived" if current.get("_archived") else current.get("state")
@@ -469,6 +473,22 @@ class ArtifactsMixin(ManagerCore):
             return []
         return [name for name in names if not name.startswith(prefix + "/")]
 
+    @staticmethod
+    def outside_directory(root: Path, old: str, new: str, directory: Path) -> list[str]:
+        """Paths changed between two commits that are not under directory, judged by path names alone.
+
+        Baton merges pull requests on this answer, so unlike non_artifact_paths it never resolves the checkout's
+        files: a symlink there must not be able to widen what is allowed.
+        """
+        names = [name for name in git(root, "diff", "--name-only", "--no-renames", "-z", old, new).split("\0") if name]
+        try:
+            prefix = directory.relative_to(root).as_posix()
+        except ValueError:
+            return names
+        if prefix == ".":
+            return []
+        return [name for name in names if not name.startswith(prefix + "/")]
+
     def fetch_artifacts(self, root: Path, default: str) -> bool:
         fetched = self.remote_git(root, "fetch", "--quiet", "origin", f"refs/heads/{default}:refs/remotes/origin/{default}")
         if fetched.returncode:
@@ -523,10 +543,9 @@ class ArtifactsMixin(ManagerCore):
             print(f"Pushed artifacts branch {name} to origin/{name}.", flush=True)
         return pushed.returncode == 0
 
-    def push_artifacts(self, root: Path, default: str, *, artifacts_root: Path | None = None,
-                       pull_request: bool | None = None) -> bool:
+    def push_artifacts(self, root: Path, default: str, *, artifacts_root: Path | None = None) -> bool:
         """Publish the shared checkout's local commits; with dedicated_artifacts_branch, through a pull request."""
-        if self.dedicated_artifacts_branch if pull_request is None else pull_request:
+        if self.dedicated_artifacts_branch:
             return self.publish_artifacts(root, default, artifacts_root=artifacts_root)
         counts = self.artifact_divergence(root, default)
         if counts is None or not counts[0]:
@@ -587,9 +606,10 @@ class ArtifactsMixin(ManagerCore):
             return subprocess.CompletedProcess(["gh", *args], 124, "", str(error))
 
     def artifacts_prs(self, root: Path, repository: str, name: str) -> list[dict[str, Any]]:
-        """Every pull request, in any state, whose head is this branch of the repository."""
+        """Every pull request, in any state, whose head is this branch of the repository itself, not of a fork."""
         listed = self.gh(root, "pr", "list", "--repo", repository, "--head", name, "--state", "all", "--limit", "100",
-                         "--json", "number,url,state,headRefName,headRefOid,baseRefName", timeout=30)
+                         "--json", "number,url,state,headRefName,headRefOid,baseRefName,isCrossRepository",
+                         timeout=30)
         if listed.returncode:
             raise ProjectError(f"Cannot list pull requests for {name} in {repository} with gh; check that gh is "
                                f"installed and authenticated for it. {listed.stderr.strip()}")
@@ -603,23 +623,27 @@ class ArtifactsMixin(ManagerCore):
                 raise ValueError("unexpected pull request list")
         except ValueError as error:
             raise ProjectError(f"Cannot read pull requests for {name} in {repository}: {error}") from error
-        return [pr for pr in prs if pr["headRefName"] == name]
+        # gh matches --head by branch name alone, so a fork's branch of the same name is listed too.
+        return [pr for pr in prs if pr["headRefName"] == name and not pr.get("isCrossRepository")]
 
     def merge_artifacts_pr(self, root: Path, default: str, name: str, sha: str, allowed: Path, *,
-                           title: str, body: str) -> bool:
+                           title: str, body: str, keep_branch: bool = False) -> bool:
         """Get commit sha into origin/<default> through a pull request from branch name, merged with a merge commit.
 
         Baton merges only these pull requests, so every file changed since the merge base must be under allowed, and
-        the merge is pinned to sha. Returns whether sha is an ancestor of the fetched origin/<default>; failures
-        are warnings and leave the commits where they were.
+        the merge is pinned to sha. Returns whether sha is an ancestor of origin/<default>; failures are warnings
+        and leave the commits where they were.
         """
         upstream = f"refs/remotes/origin/{default}"
+        # Already published as far as the last fetch knows: nothing to do, and no network call.
+        if self.is_ancestor(root, sha, upstream):
+            return True
         if not self.fetch_artifacts(root, default):
             return False
         if self.is_ancestor(root, sha, upstream):
             return True
         base = git(root, "merge-base", upstream, sha, check=False)
-        outside = self.non_artifact_paths(root, base, sha, artifacts_root=allowed) if base else ["(no merge base)"]
+        outside = self.outside_directory(root, base, sha, allowed) if base else ["(no merge base)"]
         if outside:
             self.artifact_warning(root, default, f"Local commits up to {sha[:12]} change files outside {allowed} "
                                                  f"({self.summarize(outside)}); nothing was published. "
@@ -630,14 +654,19 @@ class ArtifactsMixin(ManagerCore):
             self.artifact_warning(root, default, f"origin of {root} is not a GitHub repository; pull request "
                                                  "publication is unavailable and the commits stay local.")
             return False
-        pushed = self.remote_git(root, "push", "--quiet", "origin", f"{sha}:refs/heads/{name}")
-        if pushed.returncode:
-            self.artifact_warning(root, default, f"Push to origin/{name} failed; artifact commits are saved locally. "
-                                                 f"Retry artifacts commit to publish them.\n{pushed.stderr.strip()}")
-            return False
+        failure: ProjectError | None = None
         try:
-            reusable = [pr for pr in self.artifacts_prs(root, repository, name) if pr["state"] == "OPEN"
-                        and pr["headRefOid"] == sha and pr["baseRefName"] == default]
+            # Listed before the push, so an unusable gh leaves no branch behind on origin.
+            listed = self.artifacts_prs(root, repository, name)
+            pushed = self.remote_git(root, "push", "--quiet", "origin", f"{sha}:refs/heads/{name}")
+            if pushed.returncode:
+                self.artifact_warning(root, default, f"Push to origin/{name} failed; artifact commits are saved "
+                                                     f"locally. Retry artifacts commit to publish them.\n"
+                                                     f"{pushed.stderr.strip()}")
+                return False
+            # That push was not forced, so the branch, and with it any open pull request from it, is now at sha;
+            # the pinned merge below refuses anything else.
+            reusable = [pr for pr in listed if pr["state"] == "OPEN" and pr["baseRefName"] == default]
             if reusable:
                 number, url = str(reusable[0]["number"]), reusable[0].get("url", "")
             else:
@@ -653,28 +682,29 @@ class ArtifactsMixin(ManagerCore):
             if merged.returncode:
                 raise ProjectError(f"gh pr merge failed: {(merged.stderr or merged.stdout).strip()}")
         except ProjectError as error:
-            # A concurrent publisher of the same commit, or a merge whose response was lost, still published it.
-            if not (self.fetch_artifacts(root, default) and self.is_ancestor(root, sha, upstream)):
-                self.artifact_warning(root, default, f"Pull request publication of {sha[:12]} from {name} failed; "
-                                                     "the commits stay local and the next artifact commit retries. "
-                                                     f"{error}")
-                return False
-        else:
-            if not (self.fetch_artifacts(root, default) and self.is_ancestor(root, sha, upstream)):
-                self.artifact_warning(root, default, f"Merged {name}, but {sha[:12]} is not yet in origin/{default}; "
-                                                     "the next artifact commit checks again.")
-                return False
+            failure = error
+        # A concurrent publisher of the same commit, or a merge whose response was lost, still published it.
+        if not (self.fetch_artifacts(root, default) and self.is_ancestor(root, sha, upstream)):
+            self.artifact_warning(root, default, (
+                f"Pull request publication of {sha[:12]} from {name} failed; the commits stay local and the next "
+                f"artifact commit retries. {failure}" if failure else
+                f"Merged {name}, but {sha[:12]} is not yet in origin/{default}; the next artifact commit checks again."))
+            return False
         print(f"Published {sha[:12]} to origin/{default} through a pull request from {name}.", flush=True)
-        self.delete_remote_branch(root, name)
+        if not keep_branch:
+            self.delete_remote_branch(root, name, sha)
         return True
 
-    def delete_remote_branch(self, root: Path, name: str) -> bool:
-        """Best-effort removal of a merged branch from origin; an absent branch is already removed."""
+    def delete_remote_branch(self, root: Path, name: str, sha: str) -> bool:
+        """Best-effort removal of a merged branch from origin, only while it still points at the merged commit."""
+        deleted = self.remote_git(root, "push", "--quiet", f"--force-with-lease=refs/heads/{name}:{sha}", "origin",
+                                  f":refs/heads/{name}")
+        if deleted.returncode == 0:
+            return True
         present = self.remote_git(root, "ls-remote", "--heads", "origin", f"refs/heads/{name}")
         if present.returncode == 0 and not present.stdout.strip():
             return True
-        deleted = present if present.returncode else self.remote_git(root, "push", "--quiet", "origin", "--delete", name)
-        if deleted.returncode:
-            print(f"baton: warning: could not delete origin/{name}; its content is merged, so it can be deleted by "
-                  f"hand. {deleted.stderr.strip()}", file=sys.stderr, flush=True)
-        return deleted.returncode == 0
+        print(f"baton: warning: could not delete origin/{name}; origin is unreachable or the branch is no longer at "
+              f"the merged commit {sha[:12]}, so check it before deleting it by hand. {deleted.stderr.strip()}",
+              file=sys.stderr, flush=True)
+        return False

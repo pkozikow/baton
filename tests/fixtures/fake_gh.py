@@ -63,7 +63,8 @@ elif args[:2] == ["pr", "create"]:
         sys.exit("a pull request for this head and base already exists")
     url = f"https://github.com/{repository.removeprefix('github.com/')}/pull/{len(prs) + 1}"
     prs.append({"repository": repository, "number": len(prs) + 1, "url": url, "state": "OPEN", "headRefName": head,
-                "headRefOid": oid, "baseRefName": base, "title": option("--title"), "body": option("--body")})
+                "headRefOid": oid, "baseRefName": base, "isCrossRepository": False, "title": option("--title"),
+                "body": option("--body")})
     save()
     print(url)
 elif args[:2] == ["pr", "merge"] and "--merge" in args:
