@@ -131,7 +131,7 @@ class DedicatedArtifactsTest(unittest.TestCase):
         self.create("alpha")
         project = self.project()
         self.assertNotIn("artifacts_branch", project)
-        self.assertIsNone(json.loads(self.cli("status", "p3", "--json").stdout)["artifacts_branch"])
+        self.assertNotIn("artifacts_branch", json.loads(self.cli("status", "p3", "--json").stdout))
         self.cli("config", "set", "--dedicated-artifacts-branch")
         directory = Path(project["artifacts_path"])
         (directory / "plan.md").write_text("Plan\n")
