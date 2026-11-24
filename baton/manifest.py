@@ -49,6 +49,10 @@ def branch_suffix(branch: str, prefix: str | None = None) -> str:
     return branch.removeprefix(prefix + "/")
 
 
+def project_code_branch(project: dict[str, Any], name: str | None = None) -> str:
+    return f"{project['branch_prefix']}/{project['name'] if name is None else name}"
+
+
 
 def subplan_directory(project_directory: Path, repo: str, branch: str, prefix: str | None = None) -> Path:
     return project_directory / "branches" / repo / branch_suffix(branch, prefix)
@@ -88,13 +92,14 @@ def project_claims(project: dict[str, Any]) -> set[tuple[str, ...]]:
     rename = project.get("pending_rename") or {}
     claims: set[tuple[str, ...]] = {("name", name) for name in (project["name"], rename.get("name"),
                                                                 *project.get("previous_names", [])) if name}
+    claims.update(("coordinator", ref.casefold()) for ref in (project["branch"], rename.get("branch")) if ref)
     artifact_path = project.get("artifacts_path")
     if artifact_path:
         claims.add(("artifacts", str(artifact_path)))
     for entry in project_entries(project, include_retired=True):
         claims |= entry_claims(entry["common_dir"], entry["branch"], entry["path"])
     for move in rename.get("repos", []):
-        claims |= entry_claims(move["common_dir"], rename["branch"], move["new"])
+        claims |= entry_claims(move["common_dir"], rename.get("repo_branch", rename["branch"]), move["new"])
     for pending in (project.get("pending_member"),):
         if not pending:
             continue
@@ -110,6 +115,8 @@ def project_claims(project: dict[str, Any]) -> set[tuple[str, ...]]:
 def claim_conflict(claim: tuple[str, ...], owner: str) -> ProjectError:
     if claim[0] == "name":
         return ProjectError(f"Project already active or a former name of one: {claim[1]} (claimed by {owner})")
+    if claim[0] == "coordinator":
+        return ProjectError(f"Coordinator branch conflicts with {owner}: {claim[1]}")
     if claim[0] == "artifacts":
         return ProjectError(f"Artifact destination belongs to another project: {claim[1]} (claimed by {owner})")
     if claim[0] == "branch":

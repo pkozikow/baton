@@ -167,7 +167,7 @@ class ProjectManagerTest(unittest.TestCase):
         self.assertFalse(self.checkout("alpha").exists())
         self.assertTrue(self.checkout("alpha", "next").exists())
         self.git(source, "show-ref", "--verify", "refs/heads/baton/example", ok=False)
-        self.assertEqual(self.git(self.slots / "p3", "branch", "--show-current"), "baton/next")
+        self.assertEqual(self.git(self.slots / "p3", "branch", "--show-current"), "next")
 
     def test_declined_or_eof_replacement_preserves_project(self) -> None:
         self.make_repo("alpha")
@@ -199,7 +199,7 @@ class ProjectManagerTest(unittest.TestCase):
         self.replace_interactively(b"y\n", repo="missing", ok=False)
         self.replace_interactively(b"y\n", repo=str(self.checkout("alpha")), ok=False)
         self.assertTrue(self.checkout("alpha").exists())
-        self.assertEqual(self.git(self.slots / "p3", "branch", "--show-current"), "baton/example")
+        self.assertEqual(self.git(self.slots / "p3", "branch", "--show-current"), "example")
 
     def test_cleanup_confirmation_discards_dirty_files_and_archives_commits(self) -> None:
         source = self.make_repo("alpha")
@@ -404,8 +404,8 @@ class ProjectManagerTest(unittest.TestCase):
             self.assertEqual(self.cli("path", "renamed", name).stdout.strip(), str(renamed))
         self.assertEqual(self.git(self.checkout("alpha", "renamed"), "status", "--porcelain"), before_status)
         self.assertEqual((self.checkout("alpha", "renamed") / "notes.txt").read_text(), "Untracked change\n")
-        self.assertEqual(self.git(self.slots / "p3", "branch", "--show-current"), "baton/renamed")
-        self.git(self.projects, "show-ref", "--verify", "refs/heads/baton/example", ok=False)
+        self.assertEqual(self.git(self.slots / "p3", "branch", "--show-current"), "renamed")
+        self.git(self.projects, "show-ref", "--verify", "refs/heads/example", ok=False)
         manifest = json.loads((self.slots / "p3" / "project.json").read_text())
         self.assertEqual(manifest["name"], "renamed")
         for repo in manifest["repos"]:
@@ -430,7 +430,7 @@ class ProjectManagerTest(unittest.TestCase):
         state = state_file(self.projects)
         before = state.read_bytes()
         self.git(beta, "branch", "baton/branch-conflict")
-        self.git(self.projects, "branch", "baton/coordinator-conflict")
+        self.git(self.projects, "branch", "coordinator-conflict")
         path_conflict = self.checkout("Beta", "path-conflict")
         path_conflict.mkdir()
         (path_conflict / "keep.txt").write_text("Unrelated\n")
@@ -441,7 +441,7 @@ class ProjectManagerTest(unittest.TestCase):
                 for repo in ("alpha", "Beta"):
                     self.assertEqual(self.git(self.checkout(repo), "branch", "--show-current"), "baton/example")
                     self.assertFalse(self.checkout("alpha", name).exists())
-                self.assertEqual(self.git(self.slots / "p3", "branch", "--show-current"), "baton/example")
+                self.assertEqual(self.git(self.slots / "p3", "branch", "--show-current"), "example")
                 self.assertEqual((artifacts / "plan.md").read_text(), "Keep this plan\n")
         self.assertEqual((path_conflict / "keep.txt").read_text(), "Unrelated\n")
 
@@ -479,6 +479,9 @@ class ProjectManagerTest(unittest.TestCase):
         conflict = self.cli("create", "renamed", "-r", "gamma", cwd=self.slots / "p4", ok=False)
         self.assertIn("Project already active", conflict.stderr)
         self.assertFalse(self.checkout("gamma", "renamed").exists())
+        conflict = self.cli("create", "Renamed", "-r", "gamma", cwd=self.slots / "p4", ok=False)
+        self.assertIn("Coordinator branch conflicts with project example in slot p3", conflict.stderr)
+        self.assertFalse(self.checkout("gamma", "Renamed").exists())
         self.git(beta, "worktree", "unlock", str(self.checkout("Beta")))
         self.cli("rename", "renamed", cwd=self.slots / "p3")
 
@@ -805,7 +808,7 @@ class ProjectManagerTest(unittest.TestCase):
         reported = result.stdout.split("stash ", 1)[1].split()[0]
         entries = dict(line.split(" ", 1)[::-1] for line in
                        self.git(coordinator, "stash", "list", "--format=%H %gs").splitlines())
-        self.assertEqual(reported, entries[f"On baton/example: baton cleanup example {uuid}"])
+        self.assertEqual(reported, entries[f"On example: baton cleanup example {uuid}"])
         self.assertNotEqual(reported, self.git(coordinator, "rev-parse", "refs/stash"))
         self.assertEqual(self.git(coordinator, "show", f"{reported}^3:notes.md"), "Coordinator notes")
         self.assertFalse((coordinator / "notes.md").exists())
@@ -965,7 +968,7 @@ class ProjectManagerTest(unittest.TestCase):
         self.cli("cleanup", "p3", "--dry-run")
         self.assertEqual(state.read_bytes(), before)
         self.assertTrue(self.checkout("alpha").is_dir())
-        self.assertEqual(self.git(self.slots / "p3", "branch", "--show-current"), "baton/example")
+        self.assertEqual(self.git(self.slots / "p3", "branch", "--show-current"), "example")
 
     def test_dirty_repo_blocks_cleanup_of_all_repos(self) -> None:
         self.make_repo("alpha")

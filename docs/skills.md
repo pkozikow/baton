@@ -60,7 +60,7 @@ Plan selection uses authoritative status paths; outside the framework,
 `PLAN_REVIEW_PROJECTS_ROOT` or `BATON_ARTIFACTS_ROOT` overrides the effective
 artifact root from `baton config show --section paths` (see
 [Storage roots](configuration.md#storage-roots)).
-The branch prefix comes from `baton config show --section branch_prefix` (default `baton`, giving `baton/<project>` branches).
+The code branch prefix comes from `baton config show --section branch_prefix` (default `baton`, giving `baton/<project>` branches in participating repositories). The local coordinator uses the project name.
 
 Reviewer sets, model choices and per-run overrides are described in
 [Configuration](configuration.md#review-models). `baton review run --help` lists

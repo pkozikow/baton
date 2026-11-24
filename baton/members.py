@@ -10,7 +10,7 @@ from typing import Any
 
 from .errors import ProjectError
 from .gitutil import git, common_dir, branch, inside
-from .manifest import MEMBER_NAME_PATTERN, entries, default_entry, member_name, stack_records, entry_stack_root, ensure_stack_records, stack_scope, stack_worktree, entry_claims, project_claims, claim_conflict, managed_links, link_name, subplan_directory
+from .manifest import MEMBER_NAME_PATTERN, entries, default_entry, member_name, stack_records, entry_stack_root, ensure_stack_records, stack_scope, stack_worktree, entry_claims, project_claims, claim_conflict, managed_links, link_name, subplan_directory, project_code_branch
 from .native import require_active_top, require_top_changes, native, native_catalog, native_stack, registered_stacks
 from .core import ManagerCore
 
@@ -45,7 +45,7 @@ class MembersMixin(ManagerCore):
             return None
         if current is not None or entry_stack_root(repo, repo) is not None:
             raise ProjectError("Name the first member before native stack registration; existing stacks are not renamed.")
-        if repo["branch"] != project["branch"]:
+        if repo["branch"] != project_code_branch(project):
             raise ProjectError("Unexpected root branch before first-member initialization.")
         name, path = self.member_branch_and_path(project, repo["id"], member)
         self.check_member_destination(project, repo, member, name, path)

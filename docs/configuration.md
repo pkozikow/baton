@@ -64,8 +64,9 @@ artifact checkout marked with `.baton-artifacts`.
 
 ## Branch prefix
 
-The default prefix value is `baton`, so new projects use `baton/<project>`
-branches. Set a custom namespace with:
+The default prefix value is `baton`, so participating repositories use
+`baton/<project>` branches. The local coordinator branch uses the project name by
+itself. Set a custom namespace for code branches with:
 
 ```sh
 baton config set --branch-prefix team
