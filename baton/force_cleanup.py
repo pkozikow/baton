@@ -48,6 +48,10 @@ class ForceCleanupMixin(ManagerCore):
         print(f"{'Would force clean' if dry_run else 'Force cleanup'} {project['name']} ({project['slot']}):")
         print(f"  Reset coordinator {coordinator} to {project['slot']} and release its active registry record.")
         print(f"  Retain shared artifacts and the live board at {self.artifact_directory(project)}.")
+        record = project.get('artifacts_branch')
+        if record:
+            print(f"  Retain artifacts worktree {record['path']} and branch {record['branch']}; no pull request is "
+                  "opened or merged.")
         if project['state'] not in ('active', 'cleaning'):
             warn(f"Project is {project['state']}; unfinished operations will not be resumed.")
         if any(key.startswith('pending_') and value for key, value in project.items()):
@@ -139,6 +143,11 @@ class ForceCleanupMixin(ManagerCore):
                 self.preserve_blackboard(project)
             except FORCE_FAILURES as error:
                 warn(f"Coordination archive failed: {error}. Shared artifacts and the live board remain in place.")
+        if record:
+            warn(f"Leftover artifacts worktree {record['path']} and branch {record['branch']} (pushed to "
+                 f"origin/{record['branch']} when the push succeeded): force cleanup merges nothing, and the archived "
+                 f"project keeps pointing at the worktree. Merge the branch by hand; its sealed coordination names "
+                 f"{record['final_path']} as the project's intended location.")
         for entry in reversed(project_entries(project)):
             safe, identity, tip = snapshots[str(entry['path'])]
             if not safe:

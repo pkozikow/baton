@@ -3,17 +3,17 @@
 import contextlib
 import filecmp
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import subprocess
 import sys
 import uuid
 from typing import Any
 
 from .errors import ProjectError
-from .gitutil import git, common_dir, branch
+from .gitutil import git, common_dir, branch, inside
 from .manifest import (entries, member_name, stack_records, ensure_stack_records, stack_scope,
                        project_entries, managed_links, stack_worktree, note_directories)
-from .native import merged_pr, registered_stacks, integrated_stack, native_lock
+from .native import merged_pr, registered_stacks, integrated_stack, native_lock, github_repository
 from .force_cleanup import ForceCleanupMixin
 
 
@@ -21,12 +21,21 @@ from .force_cleanup import ForceCleanupMixin
 ARCHIVE_SKIPPED = "archive-skipped.txt"
 
 
-def require_supported_cleanup(project: dict[str, Any]) -> None:
-    """Merging a dedicated artifacts branch is not implemented yet; cleanup must not archive it unmerged."""
-    if project.get("artifacts_branch"):
-        raise ProjectError(f"Cleanup of project {project['name']}, which has a dedicated artifacts branch, is not "
-                           "supported yet; baton cleanup --force releases the slot and keeps the artifacts branch "
-                           "and worktree.")
+# The four sealed coordination files preserve_blackboard exports and commits.
+EVIDENCE_FILES = ("board.sqlite", "overview.md", "history.md", "manifest.json")
+
+
+def board_file(relative: PurePosixPath) -> bool:
+    """Baton's own ignored board files in a project's artifact directory: the live board, locks and exports."""
+    return any(part == "blackboard-lock.md" or part.startswith(("blackboard.sqlite", ".blackboard-", ".snapshot-"))
+               for part in relative.parts)
+
+
+def local_changes(root: Path, *paths: str) -> list[str]:
+    """Modified, staged, deleted or untracked non-ignored paths of a checkout, optionally limited to paths."""
+    changed = git(root, "diff", "--name-only", "--no-renames", "-z", "HEAD", "--", *paths).split("\0")
+    untracked = git(root, "ls-files", "--others", "--exclude-standard", "-z", "--", *paths).split("\0")
+    return sorted(set(filter(None, changed + untracked)))
 
 
 def unarchived_notes(worktree: Path, archive: Path) -> list[str]:
@@ -57,7 +66,6 @@ class CleanupMixin(ForceCleanupMixin):
             self.force_cleanup(selector, dry_run)
             return
         project = self.project(selector)
-        require_supported_cleanup(project)
         if project.get("pending_abandon") and not abandonment_verified:
             if dry_run:
                 raise ProjectError(f"Abandonment is pending; resume with: baton abandon {project['uuid']}")
@@ -73,6 +81,10 @@ class CleanupMixin(ForceCleanupMixin):
             print(f"  {repo['path']} and local branch {repo['branch']}")
             if repo.get("backup_ref"):
                 print(f"    Preserved tip: {repo['backup_ref']}")
+        if project.get("artifacts_branch"):
+            record = project["artifacts_branch"]
+            print(f"  Artifacts branch {record['branch']}: open and merge its pull request, then remove "
+                  f"{record['path']}; the project's artifacts move to {record['final_path']}")
         if dry_run:
             if failures:
                 print("Cleanup checks failed:\n" + "\n\n".join(failures), file=sys.stderr)
@@ -104,6 +116,8 @@ class CleanupMixin(ForceCleanupMixin):
         project["state"] = "cleaning"
         self.save()
         self.preserve_blackboard(project)
+        if project.get("artifacts_branch"):
+            self.publish_artifacts_branch(project)
         for repo in project["repos"]:
             for record in stack_records(repo):
                 group = next(group for group in registered_stacks(repo, allow_missing=True)
@@ -123,6 +137,8 @@ class CleanupMixin(ForceCleanupMixin):
                     if any(current is not None for _, _, current in registered_stacks(repo, allow_missing=True)):
                         raise ProjectError("Native stack was recreated during cleanup; preserve it before retrying.")
             self.finish_cleanup(project, coordinator, parked, dirty_repos, links)
+        if project.get("artifacts_branch"):
+            self.tidy_artifacts_branch(project)
 
     def inspect_cleanup(self, project: dict[str, Any], dry_run: bool,
                         allowed_repos: set[str], allowed_members: set[tuple[str, str]]) -> tuple[Path, bool, Path, list[str], set[str], str]:
@@ -134,7 +150,7 @@ class CleanupMixin(ForceCleanupMixin):
         parked = project["state"] == "cleaning" and branch(coordinator) == project["slot"]
         self.check_coordinator(project, idle=parked, allow_dirty=True)
         links = coordinator / "repos"
-        failures: list[str] = []
+        failures: list[str] = self.inspect_artifacts_branch(project) if project.get("artifacts_branch") else []
         coordinator_status = git(coordinator, "status", "--porcelain", "--untracked-files=all")
         if coordinator_status:
             failures.append(f"Coordinator has uncommitted files: {coordinator}\n{coordinator_status}\nThese changes will be saved in a local Git stash before cleanup.")
@@ -293,6 +309,173 @@ class CleanupMixin(ForceCleanupMixin):
             git(coordinator, "switch", project["slot"])
         if git(self.repo, "rev-parse", "--verify", f"refs/heads/{project['branch']}", check=False):
             git(self.repo, "update-ref", "-d", f"refs/heads/{project['branch']}", project["coordinator_sha"])
+        if project.get("artifacts_branch"):
+            self.relocate_artifacts(project)
         project["state"] = "archived"
         self.archive_project(project)
         print(f"Slot {project['slot']} is ready for another project.")
+
+    def artifacts_branch_paths(self, project: dict[str, Any]) -> tuple[Path, Path, str, Path]:
+        """The artifacts worktree, the shared checkout, the branch and the final directory of a project's record."""
+        record = project["artifacts_branch"]
+        return Path(record["path"]), Path(record["source"]), record["branch"], Path(record["final_path"])
+
+    def sealed_artifacts_tip(self, project: dict[str, Any]) -> str | None:
+        """The commit cleanup merges: the recorded coordination archive commit, or the branch tip without a board."""
+        worktree, _shared, name, _final = self.artifacts_branch_paths(project)
+        archive = project.get("coordination_archive") or {}
+        if archive.get("commit"):
+            return str(archive["commit"])
+        if not project.get("blackboard") or archive.get("uninitialized"):
+            return git(worktree, "rev-parse", "--verify", f"refs/heads/{name}", check=False) or None
+        return None
+
+    def inspect_artifacts_branch(self, project: dict[str, Any]) -> list[str]:
+        """Refuse every predictable blocker of merging the artifacts branch before cleanup changes anything.
+
+        Runs on every invocation, including a resume; returns the warnings that need confirmation.
+        """
+        worktree, shared, name, final = self.artifacts_branch_paths(project)
+        directory = self.artifact_directory(project)
+        record = project["artifacts_branch"]
+        if common_dir(shared) != Path(record["common_dir"]):
+            raise ProjectError(f"Artifacts repository identity changed: {shared}")
+        if (worktree.is_symlink() or not worktree.is_dir() or common_dir(worktree) != Path(record["common_dir"])
+                or Path(git(worktree, "rev-parse", "--show-toplevel")).resolve() != worktree.resolve()
+                or branch(worktree) != name):
+            raise ProjectError(f"The artifacts worktree {worktree} is missing or not on its branch {name}; "
+                               "restore it before cleanup.")
+        repository = github_repository(shared)
+        if repository is None:
+            raise ProjectError(f"Cleanup merges artifacts branch {name} through a GitHub pull request, but the origin "
+                               f"of {shared} is not a GitHub repository.")
+        default = self.artifact_checkout(shared, [])
+        upstream = f"refs/remotes/origin/{default}"
+        if not self.fetch_artifacts(shared, default):
+            raise ProjectError(f"Cannot fetch origin/{default} in {shared}; cleanup checks the merge against it. "
+                               "Retry when the remote is reachable.")
+        closed = [pr for pr in self.artifacts_prs(worktree, repository, name) if pr["state"] == "CLOSED"]
+        if closed:
+            raise ProjectError(f"Pull request #{closed[0]['number']} for artifacts branch {name} was closed without "
+                               "merging; ask the user whether to reopen it or keep the branch, then rerun cleanup.")
+        tip = git(worktree, "rev-parse", f"refs/heads/{name}")
+        base = git(worktree, "merge-base", upstream, tip, check=False)
+        outside = self.non_artifact_paths(worktree, base, tip, artifacts_root=directory) if base else ["(no merge base)"]
+        if outside:
+            raise ProjectError(f"Artifacts branch {name} changes files outside {directory} "
+                               f"({self.summarize(outside)}); cleanup merges only the project's own directory. "
+                               "Remove those changes from the branch before cleanup.")
+        coordination = directory.relative_to(worktree) / "coordination"
+        dirty = [path for path in local_changes(worktree) if not (
+            # An interrupted seal leaves these, and preserve_blackboard recovers them on resume.
+            project["state"] == "cleaning" and PurePosixPath(path).parent == PurePosixPath(coordination)
+            and PurePosixPath(path).name in EVIDENCE_FILES)]
+        if dirty:
+            raise ProjectError(f"Uncommitted files in the artifacts worktree {worktree} would not be merged: "
+                               f"{self.summarize(dirty)}. Commit them with baton artifacts commit, or remove them, "
+                               "before cleanup.")
+        head = git(shared, "rev-parse", "HEAD")
+        if not self.is_ancestor(shared, head, upstream):
+            shared_base = git(shared, "merge-base", upstream, head, check=False)
+            unpublished = (self.non_artifact_paths(shared, shared_base, head, artifacts_root=final.parent)
+                           if shared_base else ["(no merge base)"])
+            if unpublished:
+                raise ProjectError(f"The shared artifacts checkout {shared} has unpublished commits outside "
+                                   f"{final.parent} ({self.summarize(unpublished)}); ask the user to publish or "
+                                   "reconcile them before cleanup.")
+        incoming = set(filter(None, git(shared, "diff", "--name-only", "--no-renames", "-z", head, upstream).split("\0")))
+        collisions = sorted(incoming & set(local_changes(shared)))
+        if collisions:
+            raise ProjectError(f"Local files in the shared artifacts checkout {shared} collide with changes in "
+                               f"origin/{default} ({self.summarize(collisions)}); ask the user to resolve them "
+                               "before cleanup.")
+        if final.exists() or final.is_symlink():
+            sealed = self.sealed_artifacts_tip(project) if project["state"] == "cleaning" else None
+            # Present only after a resumed cleanup brought the merged branch into the shared checkout.
+            if not sealed or not self.is_ancestor(shared, sealed, "HEAD"):
+                raise ProjectError(f"{final} already exists in the shared artifacts checkout; the merged artifacts "
+                                   "branch needs that directory. Ask the user to move it before cleanup.")
+            changed = local_changes(shared, str(final.relative_to(shared)))
+            if changed:
+                raise ProjectError(f"{final} has local changes in the shared artifacts checkout "
+                                   f"({self.summarize(changed)}); ask the user to resolve them before cleanup.")
+        ignored = filter(None, git(worktree, "ls-files", "--others", "--ignored", "--exclude-standard", "-z").split("\0"))
+        extra = [path for path in ignored if not (inside(worktree / path, directory)
+                                                  and board_file(PurePosixPath((worktree / path).relative_to(directory))))]
+        if extra:
+            return [f"{len(extra)} ignored files in the artifacts worktree {worktree} are not Baton board files and "
+                    "will be deleted with it:\n" + "\n".join(extra[:20]) + ("\n..." if len(extra) > 20 else "")]
+        return []
+
+    def publish_artifacts_branch(self, project: dict[str, Any]) -> None:
+        """Merge the sealed artifacts branch, verify the merge and bring the shared checkout up to it."""
+        worktree, shared, name, final = self.artifacts_branch_paths(project)
+        sealed = self.sealed_artifacts_tip(project)
+        if sealed is None:
+            raise ProjectError(f"Artifacts branch {name} has no sealed commit; rerun cleanup to seal it.")
+        default = self.artifact_checkout(shared, [])
+        upstream = f"refs/remotes/origin/{default}"
+        # The PR helper checks ancestry first, so a resume after the merge neither pushes nor merges again.
+        if not self.merge_artifacts_pr(worktree, default, name, sealed, self.artifact_directory(project),
+                                       title=f"Archive project {project['name']}",
+                                       body=f"Opened by `baton cleanup` for project {project['name']} "
+                                            f"({project['uuid']}). It changes only the project's own directory, "
+                                            "and Baton merges it itself."):
+            raise ProjectError(f"Merging artifacts branch {name} failed (see above); every worktree is intact. "
+                               "Rerun cleanup once the cause is fixed.")
+        tip = git(worktree, "rev-parse", "--verify", f"refs/heads/{name}", check=False)
+        if not self.is_ancestor(shared, sealed, upstream) or tip != sealed:
+            raise ProjectError(f"Artifacts branch {name} moved after it was sealed at {sealed[:12]} (now "
+                               f"{tip[:12] or 'missing'}); every worktree is intact. Restore the sealed commit, or "
+                               "ask the user, before rerunning cleanup.")
+        self.push_artifacts(shared, default, artifacts_root=final.parent, pull_request=True)
+        with self.artifacts_lock(shared):
+            self.fast_forward_artifacts(shared, default, artifacts_root=final.parent, any_change=True)
+            if branch(shared) != default or not self.is_ancestor(shared, sealed, "HEAD"):
+                raise ProjectError(f"The shared artifacts checkout {shared} cannot take the merged artifacts branch "
+                                   "(see above); every worktree is intact. Ask the user to resolve that, then rerun "
+                                   "cleanup.")
+            changed = local_changes(shared, str(final.relative_to(shared)))
+            if changed:
+                raise ProjectError(f"{final} has local changes in the shared artifacts checkout "
+                                   f"({self.summarize(changed)}); every worktree is intact. Ask the user to resolve "
+                                   "them, then rerun cleanup.")
+
+    def relocate_artifacts(self, project: dict[str, Any]) -> None:
+        """Point every artifact path at the merged directory in the shared checkout, for the archiving save."""
+        worktree, shared, name, final = self.artifacts_branch_paths(project)
+        sealed = self.sealed_artifacts_tip(project)
+        tracked = sealed and git(shared, "ls-tree", "--name-only", sealed, "--",
+                                 str(self.artifact_directory(project).relative_to(worktree)))
+        if tracked and not final.is_dir():
+            raise ProjectError(f"{final} is missing from the shared artifacts checkout; the project stays in cleanup "
+                               "with its artifacts worktree intact. Restore it and rerun cleanup.")
+        project["artifacts_path"] = str(final)
+        if project.get("blackboard"):
+            project["blackboard"]["directory"] = str(final)
+        archive = project.get("coordination_archive")
+        if archive and archive.get("directory"):
+            archive["directory"] = str(final / "coordination")
+        if project.get("follow_up_path"):
+            project["follow_up_path"] = str(final / "follow-up.md")
+
+    def tidy_artifacts_branch(self, project: dict[str, Any]) -> None:
+        """Remove the merged artifacts worktree and branches, best-effort: the project is already archived."""
+        worktree, shared, name, _final = self.artifacts_branch_paths(project)
+        record = project["artifacts_branch"]
+        leftovers = []
+        try:
+            with self.repo_lock({"common_dir": record["common_dir"], "id": shared.name}):
+                if worktree.exists():
+                    git(shared, "worktree", "remove", str(worktree))
+                tip = git(shared, "rev-parse", "--verify", f"refs/heads/{name}", check=False)
+                if tip:
+                    if not self.is_ancestor(shared, tip, "HEAD"):
+                        raise ProjectError(f"branch {name} has commits that were not merged")
+                    git(shared, "update-ref", "-d", f"refs/heads/{name}", tip)
+        except ProjectError as error:
+            leftovers.append(f"artifacts worktree {worktree} or local branch {name} in {shared}: {error}")
+        if not self.delete_remote_branch(shared, name):
+            leftovers.append(f"remote branch origin/{name}")
+        for leftover in leftovers:
+            print(f"Leftover (its content is merged; remove it by hand): {leftover}", file=sys.stderr)

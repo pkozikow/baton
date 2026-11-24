@@ -7,6 +7,7 @@ from pathlib import Path
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -149,6 +150,19 @@ class ProjectManagerTest(unittest.TestCase):
     def add_artifacts_origin(self) -> Path:
         """A GitHub-looking origin for the artifacts checkout, as dedicated_artifacts_branch requires."""
         return ProjectManagerTest.github_origin(self, self.artifacts, "artifacts")
+
+    def fake_pull_requests(self) -> Path:
+        """Put tests/fixtures/fake_gh.py first on PATH as gh, for github_origin repositories; returns its PR file."""
+        bindir = self.root / "bin"
+        bindir.mkdir(exist_ok=True)
+        executable = bindir / "gh"
+        # exec keeps the caller as the fake's parent process, which gh-after-merge.sh may kill.
+        executable.write_text(f"#!/bin/sh\nexec {shlex.quote(sys.executable)} "
+                              f"{shlex.quote(str(Path(__file__).parent / 'fixtures' / 'fake_gh.py'))} "
+                              f"{shlex.quote(str(self.root))} \"$@\"\n")
+        executable.chmod(0o755)
+        self.env["PATH"] = str(bindir) + os.pathsep + self.env["PATH"]
+        return self.root / "gh-prs.json"
 
     def checkout(self, repo: str, project: str = "example") -> Path:
         return self.worktrees / repo / project

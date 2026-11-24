@@ -12,7 +12,6 @@ from .errors import ProjectError
 from .gitutil import git, common_dir, branch, write_json, inside
 from .manifest import project_entries, entry_claims, managed_links, artifacts_final_path
 from .native import github_repository
-from .cleanup import require_supported_cleanup
 from .core import ManagerCore
 from .slots import SLOT_NAMES
 
@@ -82,12 +81,15 @@ class LifecycleMixin(ManagerCore):
         self.reserve({("name", name)} | artifact_claims | set().union(*(entry_claims(r["common_dir"], r["branch"], r["path"])
                                                       for r in self.resolve_repos(repos, project, existing))))
         if existing:
-            require_supported_cleanup(existing)
             if not sys.stdin.isatty():
                 raise ProjectError(f"Slot {slot} is occupied by {existing['name']}; interactive confirmation is required, or run cleanup explicitly.")
             print(f"Slot {slot} contains project {existing['name']}. Cleanup will remove its registered worktrees and local branches:", file=sys.stderr)
             for repo in project_entries(existing):
                 print(f"  {repo['path']} ({repo['branch']})", file=sys.stderr)
+            if existing.get("artifacts_branch"):
+                previous = existing["artifacts_branch"]
+                print(f"It will also publish artifacts branch {previous['branch']} through a pull request, merge that "
+                      f"pull request, and remove {previous['path']}.", file=sys.stderr)
             print(f"Clean up {existing['name']} and create {name} instead? [y/N] ", end="", file=sys.stderr, flush=True)
             if sys.stdin.readline().strip().lower() not in ("y", "yes"):
                 raise ProjectError("Replacement cancelled; existing project unchanged.")

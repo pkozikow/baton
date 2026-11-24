@@ -875,6 +875,9 @@ class Gdoc:
         if not self.manager.fetch_artifacts(self.root, default):
             raise ProjectError("Fetching the artifact checkout failed; push changes the Doc only from an up-to-date "
                                "checkout. Retry when the remote is reachable.")
+        if self.manager.dedicated_artifacts_branch:
+            # Publishing unpublished commits leaves the checkout behind rather than diverged, so it can catch up.
+            self.manager.push_artifacts(self.root, default, artifacts_root=self.directory.parent)
         with self.manager.artifacts_lock(self.root):
             self.manager.fast_forward_artifacts(self.root, default, artifacts_root=self.directory.parent)
         self.require_not_behind()
