@@ -15,6 +15,7 @@ from ..native import github_repository_for_remote
 
 CALL_TIMEOUT = 5.0
 TOTAL_BUDGET = 15.0
+REAP_TIMEOUT = 5.0
 STATES = ("OPEN", "CLOSED", "MERGED")
 
 _lock = threading.Lock()
@@ -31,13 +32,20 @@ def _kill(process: subprocess.Popen[str]) -> None:
 
 
 def terminate_all() -> None:
-    """Stop every in-flight lookup and refuse new ones; called once when the server stops."""
+    """Stop and reap every in-flight lookup and refuse new ones; called once when the server stops."""
     global _closing
     with _lock:
         _closing = True
         children = list(_children)
     for process in children:
         _kill(process)
+    for process in children:
+        # Lookup threads are daemons, so the server would otherwise exit before they reap their child; where
+        # PID 1 does not reap orphans, that leaves a zombie per shutdown.
+        try:
+            process.wait(REAP_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            pass
 
 
 def _run(args: list[str], cwd: Path, timeout: float) -> tuple[int, str]:

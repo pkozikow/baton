@@ -399,6 +399,19 @@ class WebTest(unittest.TestCase):
         self.assertEqual([(pulls.repo, pulls.unavailable) for pulls in result],
                          [("first", "lookup failed"), ("second", "lookup time budget exhausted")])
 
+    def test_stopping_reaps_in_flight_lookups(self) -> None:
+        self.addCleanup(setattr, prs, "_closing", False)
+        lookup = threading.Thread(target=lambda: prs._run(["sleep", "60"], self.root, 30))
+        lookup.start()
+        self.addCleanup(lookup.join, 30)
+        deadline = time.monotonic() + 20
+        while not prs._children and time.monotonic() < deadline:
+            time.sleep(0.01)
+        (process,) = prs._children
+        prs.terminate_all()
+        # Reaped before terminate_all returns: the server exits next and would leave a zombie behind.
+        self.assertEqual(process.returncode, -signal.SIGKILL)
+
     def test_uninitialized_registry_is_never_created_or_repaired(self) -> None:
         registry = self.projects / ".git" / "baton"
         shutil.rmtree(registry / "v2")
@@ -531,10 +544,22 @@ class WebProcessTest(unittest.TestCase):
         group = int(pid_file.read_text())
         self.stop(process)
         client.join(30)
+
+        def left_behind() -> dict[int, str]:
+            pids = subprocess.run(["pgrep", "-g", str(group)], capture_output=True, text=True).stdout.split()
+            if not pids:
+                return {}
+            rows = subprocess.run(["ps", "-o", "pid=", "-o", "stat=", "-p", ",".join(pids)], capture_output=True,
+                                  text=True).stdout.splitlines()
+            states = {int(row.split()[0]): row.split()[1] for row in rows if row.strip()}
+            # The server reaps its own child. The wrapper's child dies with it, but only PID 1 can reap that
+            # orphan, so where PID 1 does not, its zombie is not the server's to clean up.
+            return {pid: state for pid, state in states.items() if pid == group or not state.startswith("Z")}
+
         deadline = time.monotonic() + 10
-        while subprocess.run(["pgrep", "-g", str(group)], capture_output=True).returncode == 0 and time.monotonic() < deadline:
+        while left_behind() and time.monotonic() < deadline:
             time.sleep(0.05)
-        self.assertNotEqual(subprocess.run(["pgrep", "-g", str(group)], capture_output=True).returncode, 0)
+        self.assertEqual(left_behind(), {})
 
 
 if __name__ == "__main__":
