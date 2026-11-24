@@ -203,6 +203,10 @@ class AbandonMixin(ManagerCore):
             for pr in prs:
                 print(f"  Close {pr['repository']} #{pr['number']}: {pr['url']}")
             print("Local worktrees and branches will be removed. Unmerged tips are preserved in local archive refs.")
+            if project.get("artifacts_branch"):
+                record = project["artifacts_branch"]
+                print(f"Artifacts branch {record['branch']} will be published through a pull request that Baton merges, "
+                      f"and {record['path']} removed.")
             if failures:
                 print("Cleanup warnings/blockers:\n" + "\n\n".join(failures))
             print("PR closures may succeed even if later cleanup fails. Run the retrospective before cleanup to preserve notes.")

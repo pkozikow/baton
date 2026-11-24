@@ -12,6 +12,7 @@ from .core import ManagerCore
 from .artifacts import unsafe_artifact_path
 from .errors import ProjectError
 from .gitutil import git, require_agent_write_path
+from .manifest import artifacts_branch_name
 
 
 class FollowUpMixin(ManagerCore):
@@ -80,18 +81,21 @@ class FollowUpMixin(ManagerCore):
             context += "\nFollow earlier context manually for older history; its availability is not required.\n"
         return {"name": name, "root": root, "number": number, "sources": sources, "context": context}
 
-    def preflight_follow_up(self, project: dict[str, Any]) -> tuple[Path, str]:
-        path = Path(project["follow_up_path"])
-        directory = self.artifact_directory(project)
-        if path != directory / "follow-up.md":
-            raise ProjectError("Unexpected follow-up context destination.")
+    def preflight_follow_up(self, project: dict[str, Any], directory: Path | None = None) -> tuple[Path, str]:
+        """Check the recorded destination, or the same file in the given directory before the project's exists."""
+        if directory is None:
+            path = Path(project["follow_up_path"])
+            if path != self.artifact_directory(project) / "follow-up.md":
+                raise ProjectError("Unexpected follow-up context destination.")
+            directory = path.parent
+        path = directory / "follow-up.md"
         require_agent_write_path(path)
         if unsafe_artifact_path(path):
             raise ProjectError(f"Unsafe follow-up artifact path (relative or symlink): {path}")
         Blackboard._regular(path, missing=True)
         root = self.artifacts_git(directory)
         relative = str(path.relative_to(root))
-        self.artifact_checkout(root, [relative])
+        self.artifact_checkout(root, [relative], artifacts_branch_name(project, path))
         if git(root, "ls-files", "-u"):
             raise ProjectError("Resolve artifact checkout conflicts before creating a follow-up.")
         for operation in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"):
@@ -124,4 +128,5 @@ class FollowUpMixin(ManagerCore):
                 Path(temporary).unlink(missing_ok=True)
 
         self.commit_artifact_paths(root, f"Record follow-up context for {project['name']}", [relative],
-                                   push=False, sync=False, prepare=prepare)
+                                   push=False, sync=False, prepare=prepare,
+                                   expected_branch=artifacts_branch_name(project, path))

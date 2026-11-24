@@ -109,6 +109,12 @@ in" without `USER` because its login lives in the keychain. Keychain- or keyring
 unlock in a cron session; if so, set that vendor's token environment variable for
 the cron job manually, following the vendor's documentation.
 
+With [`dedicated_artifacts_branch`](configuration.md#dedicated-artifacts-branch)
+on, publishing a retro commit runs `gh` in the Baton process to open and merge its
+pull request, so `gh` must be authenticated in the cron environment too (for
+example through `GH_TOKEN`); otherwise the commit stays local with a warning on
+every run.
+
 #### Run state and recovery
 
 Locks, attempt logs (`attempt-N.log` for standard output and publication,
@@ -122,7 +128,9 @@ workspaces remain available for recovery, with best-effort cleanup after seven d
 and retries use fresh workspaces. A verified published draft whose artifact commit
 failed retries the commit without another model run. Normal artifact publication
 rules still apply: a network failure may leave a valid commit local, and actual
-checkout divergence needs user reconciliation.
+checkout divergence needs user reconciliation. With `dedicated_artifacts_branch`
+on, publication goes through a merged pull request, which also reconciles a
+checkout that was ahead and behind.
 
 ### Completion rules
 
@@ -223,6 +231,9 @@ file hashes match retained verified output; conflicting contents or symlinked
 outputs require manual inspection and are never overwritten. Commit/push retries
 reuse verified output without another model call. Results distinguish saved files,
 local commits and remote publication; network failure may leave a local commit.
+With `dedicated_artifacts_branch` on, the report is published through a pull
+request that Baton merges, and counts as published once its commit is in
+`origin/<default>`, even if the checkout could not be fast-forwarded.
 Until the final draft is verified, retries may rerun intermediate analyses against
 the same frozen sources; intermediate notes are not published as source evidence.
 Normal artifact reconciliation rules apply: never reset or rebase the shared checkout.

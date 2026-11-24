@@ -19,6 +19,7 @@ from typing import Any
 from .artifacts import open_artifact, read_artifact, unsafe_artifact_path
 from .errors import NoProject, ProjectError
 from .gitutil import git, write_json
+from .manifest import artifacts_branch_name
 from .providers import process_start
 
 RECORD = "run.json"
@@ -195,7 +196,10 @@ def save(run_dir: Path, selector: str | None) -> int:
     if directory.is_symlink() or not directory.is_dir():
         raise ProjectError(f"Unsafe project artifacts directory: {directory}")
     root = manager.artifacts_git(directory)
-    manager.artifact_checkout(root, [])
+    target = artifacts_branch_name(project)
+    if target is not None:
+        manager.require_open_artifacts(project)
+    manager.artifact_checkout(root, [], target)
     saved_root = directory / "reviews"
     if saved_root.is_symlink() or (saved_root.exists() and not saved_root.is_dir()):
         raise ProjectError(f"Unsafe review runs directory: {saved_root}")

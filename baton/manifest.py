@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import ProjectError
+from .gitutil import inside
 
 
 MEMBER_NAME_PATTERN = r"[A-Za-z0-9][A-Za-z0-9_-]*"
@@ -98,6 +99,10 @@ def project_claims(project: dict[str, Any]) -> set[tuple[str, ...]]:
         claims.add(("artifacts", str(artifact_path)))
     for entry in project_entries(project, include_retired=True):
         claims |= entry_claims(entry["common_dir"], entry["branch"], entry["path"])
+    record = project.get("artifacts_branch")
+    if record:
+        claims |= entry_claims(record["common_dir"], record["branch"], record["path"])
+        claims.add(("artifacts", record["final_path"]))
     for move in rename.get("repos", []):
         claims |= entry_claims(move["common_dir"], rename.get("repo_branch", rename["branch"]), move["new"])
     for pending in (project.get("pending_member"),):
@@ -110,6 +115,30 @@ def project_claims(project: dict[str, Any]) -> set[tuple[str, ...]]:
         if pending.get("first_move") and common:
             claims |= entry_claims(common, pending["first_move"]["new_branch"], pending["first_move"]["new_path"])
     return claims
+
+
+def artifacts_branch_name(project: dict[str, Any], path: Path | None = None) -> str | None:
+    """The project branch that commits of this artifact path (default: the project's directory) belong on.
+
+    None means the shared checkout's default branch: no record, or a path outside the recorded worktree,
+    such as the final shared-checkout directory a project is archived to.
+    """
+    record = project.get("artifacts_branch")
+    if not record:
+        return None
+    target = Path(project["artifacts_path"]) if path is None else path
+    return record["branch"] if inside(target, Path(record["path"])) else None
+
+
+def artifacts_repository(record: dict[str, Any]) -> dict[str, Any]:
+    """The fields repo_lock needs, for the artifacts repository that is not a project entry."""
+    return {"common_dir": record["common_dir"], "id": Path(record["source"]).name}
+
+
+def artifacts_final_path(project: dict[str, Any]) -> Path:
+    """Where the project's artifacts live once archived: the shared checkout's directory for this project."""
+    record = project.get("artifacts_branch")
+    return Path(record["final_path"] if record else project["artifacts_path"])
 
 
 def claim_conflict(claim: tuple[str, ...], owner: str) -> ProjectError:

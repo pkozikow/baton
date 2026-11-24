@@ -15,7 +15,7 @@ import uuid
 from .core import ManagerCore
 from .errors import ProjectError
 from .gitutil import branch, common_dir, git, require_agent_write_path
-from .manifest import project_entries, coordination_context, render_coordination_context
+from .manifest import project_entries, coordination_context, render_coordination_context, artifacts_branch_name
 from .providers import PROVIDERS, Provider, UnsupportedProviderOperation, get_provider, scrubbed_environment
 
 
@@ -262,6 +262,13 @@ class SessionsMixin(ManagerCore):
         provider: Provider = PROVIDERS[owner["provider"]]
         session_id = owner["session_id"] if provider.supports_fork else None
         directory = self.validate_retro_directory(project)
+        try:
+            # Before any model run: a sealed artifacts branch could not take the retrospective's commit.
+            if artifacts_branch_name(project) is not None:
+                self.require_open_artifacts(project)
+        except ProjectError as error:
+            return {"uuid": project["uuid"], "status": "blocked", "returncode": 1, "provider": provider.name,
+                    "error": str(error)}
         workspace = create_draft_workspace()
         try:
             draft = workspace / "retro.md"

@@ -112,6 +112,19 @@ Cleanup seals a verified archive (`board.sqlite`, `overview.md`, `history.md`,
 failure blocks cleanup; repair and resume without editing or thawing sealed state.
 Sealing does not complete unfinished tasks.
 
+For a project with an `artifacts_branch` in status, cleanup also opens and merges
+the artifacts PR for that branch, pinned to the sealed commit, then archives the
+project in the shared checkout and removes the artifacts worktree and branch.
+Abandonment and replacing a slot's project do the same. Running cleanup at the
+user's request is the approval; never merge that PR yourself. Cleanup refuses
+before sealing when the branch touches files outside the project directory, the
+artifacts worktree has uncommitted files, a PR for it was closed unmerged, `gh`
+is unavailable, or the shared checkout cannot take the merge; report the blocker
+to the user. A failure after sealing leaves every worktree in place; resume with
+`baton cleanup`, which does not merge again. Report printed leftovers. Force
+cleanup merges nothing and keeps the artifacts worktree and branch for the user
+to merge by hand.
+
 `baton cleanup [PROJECT] --force` is last-resort local slot release. It reports
 blockers and always asks for interactive confirmation; `--force --dry-run` only
 previews. Preservation/removal failures become warnings when the coordinator can

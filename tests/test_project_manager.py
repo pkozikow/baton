@@ -7,6 +7,7 @@ from pathlib import Path
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -130,6 +131,38 @@ class ProjectManagerTest(unittest.TestCase):
             self.git(repo, "push", "-u", "origin", default)
             self.git(repo, "remote", "set-head", "origin", "-a")
         return repo
+
+    def github_origin(self, repo: Path, name: str) -> Path:
+        """Give a checkout a GitHub origin URL that Git rewrites to a local bare repository."""
+        origin = self.root / f"{name}.git"
+        if not origin.exists():
+            self.git(self.root, "init", "--bare", "-b", "main", str(origin))
+        url = f"https://github.com/example/{name}.git"
+        self.git(repo, "remote", "set-url" if self.git(repo, "remote") else "add", "origin", url)
+        # Shared by every worktree of the repository, while baton still reads the GitHub URL from remote.origin.url.
+        self.git(repo, "config", f"url.{origin}.insteadOf", url)
+        default = self.git(repo, "branch", "--show-current")
+        self.git(repo, "push", "-q", "origin", default)
+        self.git(repo, "fetch", "-q", "origin")
+        self.git(repo, "remote", "set-head", "origin", default)
+        return origin
+
+    def add_artifacts_origin(self) -> Path:
+        """A GitHub-looking origin for the artifacts checkout, as dedicated_artifacts_branch requires."""
+        return ProjectManagerTest.github_origin(self, self.artifacts, "artifacts")
+
+    def fake_pull_requests(self) -> Path:
+        """Put tests/fixtures/fake_gh.py first on PATH as gh, for github_origin repositories; returns its PR file."""
+        bindir = self.root / "bin"
+        bindir.mkdir(exist_ok=True)
+        executable = bindir / "gh"
+        # exec keeps the caller as the fake's parent process, which gh-after-merge.sh may kill.
+        executable.write_text(f"#!/bin/sh\nexec {shlex.quote(sys.executable)} "
+                              f"{shlex.quote(str(Path(__file__).parent / 'fixtures' / 'fake_gh.py'))} "
+                              f"{shlex.quote(str(self.root))} \"$@\"\n")
+        executable.chmod(0o755)
+        self.env["PATH"] = str(bindir) + os.pathsep + self.env["PATH"]
+        return self.root / "gh-prs.json"
 
     def checkout(self, repo: str, project: str = "example") -> Path:
         return self.worktrees / repo / project

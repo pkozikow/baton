@@ -159,6 +159,7 @@ class RunStatusTest(ReviewRunnerFixture):
 
 class SaveTest(unittest.TestCase):
     """`baton review save` inside and outside a project, with a disposable project manager."""
+    dedicated = False
 
     def setUp(self) -> None:
         self.fixture = fixtures.ProjectManagerTest()
@@ -174,6 +175,9 @@ class SaveTest(unittest.TestCase):
         env.update(TMPDIR=str(self.tmp), CLAUDE_BIN=str(stub), REVIEW_TEST_ROOT=str(root),
                    PLAN_REVIEW_REVIEWERS="claude", PEER_REVIEW_REVIEWERS="claude", PEER_REVIEW_SKIP_FETCH="1")
         self.fixture.make_repo("alpha")
+        if self.dedicated:
+            self.origin = self.fixture.add_artifacts_origin()
+            self.fixture.cli("config", "set", "--dedicated-artifacts-branch")
         self.fixture.create("alpha")
         self.checkout = self.fixture.checkout("alpha")
         self.directory = fixtures.artifact_path(self.fixture.projects, self.fixture.artifacts)
@@ -294,6 +298,58 @@ class SaveTest(unittest.TestCase):
         self.assertEqual((record["base_ref"], record["project"]["name"]), ("refs/remotes/origin/main", "example"))
         self.baton("review", "save", str(run_dir))
         self.assertTrue((self.directory / "reviews" / record["id"] / "run.json").is_file())
+
+
+
+class DedicatedBranchSaveTest(unittest.TestCase):
+    """A project with its own artifacts branch saves review runs there."""
+    dedicated = True
+    setUp = SaveTest.setUp
+    baton = SaveTest.baton
+    run_dir = SaveTest.run_dir
+
+    def test_save_commits_on_the_project_branch_and_pushes_it(self) -> None:
+        record = fixtures.read_state(self.fixture.projects)["projects"]["p3"]["artifacts_branch"]
+        worktree = Path(record["path"])
+        shared = self.fixture.git(self.fixture.artifacts, "rev-parse", "HEAD")
+        run_dir = self.run_dir(self.baton("review", "run", "--kind=plan"))
+        run = json.loads((run_dir / "run.json").read_text())
+        result = self.baton("review", "save", str(run_dir))
+        self.assertIn(f"Pushed artifacts branch {record['branch']}", result.stdout)
+        saved = self.directory / "reviews" / run["id"]
+        self.assertEqual(len(self.fixture.git(worktree, "ls-files", "--", str(saved)).splitlines()), 2)
+        self.assertEqual(self.fixture.git(worktree, "log", "-1", "--format=%s"), f"Save plan review run {run['id']}")
+        self.assertEqual(self.fixture.git(self.origin, "rev-parse", f"refs/heads/{record['branch']}"),
+                         self.fixture.git(worktree, "rev-parse", "HEAD"))
+        self.assertEqual(self.fixture.git(self.fixture.artifacts, "rev-parse", "HEAD"), shared)
+
+    def test_save_on_the_archived_project_publishes_through_one_merged_pull_request(self) -> None:
+        pull_requests = self.fixture.fake_pull_requests()
+        run_dir = self.run_dir(self.baton("review", "run", "--kind=plan"))
+        run = json.loads((run_dir / "run.json").read_text())
+        self.fixture.cli("artifacts", "commit", "--selector", "example", "-m", "Add plan", str(self.directory / "plan.md"))
+        self.fixture.cli("cleanup", "p3")
+        archived = fixtures.read_state(self.fixture.projects)["archive"][-1]
+        final = Path(archived["artifacts_path"])
+        self.assertEqual(final.parent, self.fixture.artifacts.resolve())
+        self.baton("review", "save", str(run_dir), "--selector", archived["uuid"], cwd=self.fixture.root)
+        artifacts = self.fixture.artifacts
+        saved = self.fixture.git(artifacts, "rev-parse", "HEAD^2")
+        self.assertEqual(self.fixture.git(artifacts, "log", "-1", "--format=%s", saved), f"Save plan review run {run['id']}")
+        self.assertEqual(len(self.fixture.git(artifacts, "ls-files", "--", str(final / "reviews" / run["id"])).splitlines()), 2)
+        prs = json.loads(pull_requests.read_text())
+        self.assertEqual([(pr["headRefName"], pr["state"]) for pr in prs][-1], (f"baton/artifacts-{saved}", "MERGED"))
+        self.assertEqual(len(prs), 2)
+        self.assertEqual(self.fixture.git(artifacts, "rev-parse", "HEAD"), self.fixture.git(self.origin, "rev-parse", "main"))
+        self.assertEqual(self.fixture.git(artifacts, "status", "--porcelain"), "")
+
+    def test_save_is_refused_while_cleaning_and_copies_nothing(self) -> None:
+        run_dir = self.run_dir(self.baton("review", "run", "--kind=plan"))
+        path = fixtures.state_file(self.fixture.projects)
+        path.write_text(json.dumps(dict(json.loads(path.read_text()), state="cleaning")))
+        refused = self.baton("review", "save", str(run_dir), ok=False)
+        self.assertIn("sealed", refused.stderr)
+        self.assertFalse((self.directory / "reviews").exists())
 
 
 if __name__ == "__main__":

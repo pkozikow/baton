@@ -4,8 +4,9 @@ import shlex
 import shutil
 import unittest
 
-from test_project_manager import artifact_path
+from test_project_manager import artifact_path, read_state
 
+import test_force_cleanup as force_fixtures
 import test_project_manager as fixtures
 import test_project_stacks as stack_fixtures
 
@@ -22,6 +23,7 @@ class MixedCleanupTest(unittest.TestCase):
     manifest = stack_fixtures.ProjectStacksTest.manifest
     commit_file = stack_fixtures.ProjectStacksTest.commit_file
     fake_pull_requests = stack_fixtures.ProjectStacksTest.fake_pull_requests
+    force = force_fixtures.ForceCleanupTest.force
 
     def mixed_project(self) -> Path:
         source = self.make_repo("alpha")
@@ -37,6 +39,13 @@ class MixedCleanupTest(unittest.TestCase):
         self.cli("branch", "add", "alpha", "standalone", cwd=self.slots / "p3")
         self.commit_file(self.layer("standalone"), "standalone.txt", "Independent work\n")
         return source
+
+    def test_force_cleanup_with_native_stacks_releases_the_slot(self) -> None:
+        self.mixed_project()
+        result = self.force()
+        self.assertIn("Native stack", result.stderr)
+        self.assertEqual(read_state(self.projects)["projects"], {})
+        self.assertEqual(self.git(self.slots / "p3", "branch", "--show-current"), "p3")
 
     def integrate_members(self, source: Path) -> None:
         for name in ("first-child", "second-child", "standalone"):

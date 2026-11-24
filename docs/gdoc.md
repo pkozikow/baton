@@ -116,6 +116,12 @@ what it read before the export, except when it already holds the new content, so
 rerunning a pull whose commit failed completes it. An unchanged Doc makes no
 commit. A refused link is skipped, the others commit, and the command exits 1.
 
+Pull publishes its commits as other artifact commits do. A project with its own
+[artifacts branch](configuration.md#dedicated-artifacts-branch) pushes that
+branch, with no default-branch sync. With `dedicated_artifacts_branch` on, the
+shared checkout publishes through a pull request that Baton merges instead of a
+push to the default branch.
+
 The first pull after adopting a Doc rewrites formatting and brings in every edit
 made in the Doc so far; `--dry-run` shows that diff first.
 
@@ -136,6 +142,12 @@ the anchor of one spanning text and the image to its text part), and a
 placeholder paragraph's text is replaced by the image. The marks are rewritten
 with the new image IDs and hashes and committed. Temporary Docs are deleted
 afterwards.
+
+On a project with its own artifacts branch, push checks only that the worktree is
+on that branch: the branch has a single writer and is normally behind the default
+branch. With `dedicated_artifacts_branch` on, a shared checkout that has
+unpublished commits publishes them first through a pull request, which leaves it
+behind rather than diverged, so it can fast-forward before the "not behind" check.
 
 When Google refuses the `batchUpdate` because the Doc's revision moved after push
 read it (any edit or comment moves it), nothing was written; push says so, and

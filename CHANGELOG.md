@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- `baton config set --dedicated-artifacts-branch` (`dedicated_artifacts_branch`,
+  default off) supports artifacts repositories whose default branch accepts
+  changes only through pull requests. Each new project keeps its artifacts on its
+  own branch in a worktree under the worktrees root (`status --json` reports
+  `artifacts_branch`), and every artifact commit is pushed to that branch.
+  `baton cleanup`, `baton abandon` and replacing a slot's project open one pull
+  request for the branch, merge it with a merge commit pinned to the sealed
+  commit, and archive the project in the shared checkout; `cleanup --force`
+  merges nothing and keeps the worktree and branch. Commits without a project
+  branch (archived projects, weekly retro summaries, projects created before the
+  setting) are published through a pull request that Baton merges, never pushed
+  to the default branch, and the shared checkout then takes any pure
+  fast-forward, including upstream changes outside the artifacts root. It
+  requires a GitHub `origin`, an authenticated `gh` (also under cron), pull
+  requests that need no approval, and merge commits. With the setting off,
+  nothing changes. See
+  [Dedicated artifacts branch](docs/configuration.md#dedicated-artifacts-branch).
+
 - `baton web [--port PORT] [--open]` serves a local, read-only web UI on
   `127.0.0.1` until Ctrl-C: coordinator slots and archived projects, per-project
   status, the artifact directory with Markdown and Mermaid diagrams rendered in the

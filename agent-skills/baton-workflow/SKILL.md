@@ -12,7 +12,11 @@ owns current project identity and paths. Operate only within the user's scope.
 
 Never merge a PR or enable auto-merge without explicit user approval of that
 merge action. Implementing or approving a plan that calls for a merge does not
-grant merge approval.
+grant merge approval. The one exception: when the user has turned on
+`dedicated_artifacts_branch`, Baton itself merges the artifacts-repository PRs it
+opens (the project artifacts PR during cleanup or abandonment, and shared-checkout
+publication PRs) after checking their content. Agents still run cleanup only on
+user request and never run `gh pr merge` themselves, for those PRs or any other.
 
 Terms used throughout:
 

@@ -15,7 +15,7 @@ from blackboard import BlackboardError
 
 from .core import ManagerCore
 from .errors import ProjectError
-from .gitutil import branch, common_dir, git, inside, write_json
+from .gitutil import branch, common_dir, git, inside, worktree_on_branch, write_json
 from .manifest import branch_suffix, managed_links, project_claims, project_entries
 from .native import registered_stacks
 
@@ -48,6 +48,10 @@ class ForceCleanupMixin(ManagerCore):
         print(f"{'Would force clean' if dry_run else 'Force cleanup'} {project['name']} ({project['slot']}):")
         print(f"  Reset coordinator {coordinator} to {project['slot']} and release its active registry record.")
         print(f"  Retain shared artifacts and the live board at {self.artifact_directory(project)}.")
+        artifacts_record = project.get('artifacts_branch')
+        if artifacts_record:
+            print(f"  Retain artifacts worktree {artifacts_record['path']} and branch {artifacts_record['branch']}; "
+                  "force cleanup opens and merges no pull request.")
         if project['state'] not in ('active', 'cleaning'):
             warn(f"Project is {project['state']}; unfinished operations will not be resumed.")
         if any(key.startswith('pending_') and value for key, value in project.items()):
@@ -139,6 +143,18 @@ class ForceCleanupMixin(ManagerCore):
                 self.preserve_blackboard(project)
             except FORCE_FAILURES as error:
                 warn(f"Coordination archive failed: {error}. Shared artifacts and the live board remain in place.")
+        if artifacts_record:
+            leftover = (f"Leftover artifacts worktree {artifacts_record['path']} and branch "
+                        f"{artifacts_record['branch']}: the archived project keeps pointing at the worktree. ")
+            if self.force_artifacts_merged(project):
+                # An earlier ordinary cleanup got as far as merging the branch.
+                warn(leftover + f"The branch is already merged: its content is also at {artifacts_record['final_path']} "
+                                "once the shared artifacts checkout is up to date. Keep the worktree for as long as "
+                                "the archived project should resolve.")
+            else:
+                warn(leftover + f"Force cleanup merges nothing (the branch is on origin/{artifacts_record['branch']} "
+                                "when its push succeeded). Merge the branch by hand; its sealed coordination names "
+                                f"{artifacts_record['final_path']} as the project's intended location.")
         for entry in reversed(project_entries(project)):
             safe, identity, tip = snapshots[str(entry['path'])]
             if not safe:
@@ -170,6 +186,23 @@ class ForceCleanupMixin(ManagerCore):
                 active.unlink(missing_ok=True)
                 self.state['projects'].pop(project['slot'], None)
         print(f"Slot {project['slot']} is ready for another project.")
+
+    def force_artifacts_merged(self, project: dict[str, Any]) -> bool:
+        """Whether everything in the artifacts worktree is in the default branch, as far as the last fetch knows.
+
+        Judged by the branch as it is now, not by the sealed commit: later commits or uncommitted files are unmerged.
+        """
+        record = project['artifacts_branch']
+        source, worktree = Path(record['source']), Path(record['path'])
+        try:
+            upstream = self.base(source, refresh=False)
+            tip = git(source, 'rev-parse', '--verify', f"refs/heads/{record['branch']}")
+            clean = (worktree_on_branch(worktree, Path(record['common_dir']), record['branch'])
+                     and not git(worktree, 'status', '--porcelain', '--untracked-files=all'))
+        except FORCE_FAILURES:
+            return False
+        return clean and subprocess.run(['git', '-C', str(source), 'merge-base', '--is-ancestor', tip, upstream],
+                                        capture_output=True).returncode == 0
 
     def force_artifact_directory(self, project: dict[str, Any]) -> Path:
         directory = self.validate_retro_directory(project)

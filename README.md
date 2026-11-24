@@ -131,7 +131,11 @@ See [Web UI](docs/web.md) for the views and the safety model.
 - **Code worktree**: one Git worktree per registered repository and branch. Paths
   come from `baton status --json`, never from branch names.
 - **Artifacts**: the master plan, per-branch subplans, and the retrospective, kept in
-  a shared Git checkout and committed with `baton artifacts commit`.
+  a shared Git checkout and committed with `baton artifacts commit`. For an artifacts
+  repository that accepts changes only through pull requests, turn on
+  [`dedicated_artifacts_branch`](docs/configuration.md#dedicated-artifacts-branch):
+  each project then keeps its artifacts on its own branch, merged by one pull
+  request at cleanup.
 - **Session ownership**: the first top-level agent, from any registered provider,
   claims the project with `baton session claim`. Ownership is permanent; forks
   inherit history only, and providers without a native fork start fresh sessions.
@@ -150,7 +154,7 @@ preferences are described in [Configuration](docs/configuration.md). The bundled
 
 - [Installation](docs/installation.md): cron job, skill-only and CLI-only installs, `baton doctor`
 - [Projects](docs/projects.md): slots, worktrees, artifacts, branches, sessions, retirement
-- [Configuration](docs/configuration.md): storage roots, aliases, providers, review and worker models
+- [Configuration](docs/configuration.md): storage roots, artifacts branch mode, aliases, providers, review and worker models
 - [Skills and reviews](docs/skills.md): bundled skills and review execution
 - [Blackboard and tasks](docs/blackboard-and-tasks.md): SQLite board, tasks, export, sealing
 - [Retrospectives](docs/retrospectives.md): interactive and unattended retros, plus weekly cross-project reports
