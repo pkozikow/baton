@@ -119,6 +119,15 @@ selectors are accepted. When the artifact checkout has an `origin` remote, the
 command syncs with it and pushes the commit; `--no-push` commits locally only. Shared blackboard files are ignored coordination state; use
 `baton blackboard` commands and never commit them.
 
+With [`dedicated_artifacts_branch`](configuration.md#dedicated-artifacts-branch)
+on, a new project's `artifacts_path` is inside its own artifacts worktree, on its
+own branch (status reports `artifacts_branch` with `branch`, `path` and
+`base_ref`), and artifact commits are pushed to that branch instead of the default
+branch. Cleanup merges the branch and switches `artifacts_path` to
+`<artifacts_root>/<creation-name>-<uuid8>` in the shared checkout. Commits without
+a project branch, such as those of archived projects, are published through
+pull requests that Baton merges.
+
 A Markdown artifact can be linked to a Google Doc with `baton gdoc link`; the Doc
 then owns its text and `baton gdoc pull` commits it back as an archive.
 `baton status --json` lists such links as `gdoc_links`. See
@@ -221,6 +230,42 @@ and `thoughts`. An explicit override replaces that list.
 Cleanup seals the coordination history before removing worktrees; see
 [Blackboard and tasks](blackboard-and-tasks.md#cleanup-and-sealed-archives).
 
+### Projects with an artifacts branch
+
+For a project created with
+[`dedicated_artifacts_branch`](configuration.md#dedicated-artifacts-branch) on,
+cleanup also merges the project's artifacts branch through one pull request, with a
+merge commit, whatever the setting is by then:
+
+1. **Inspect** (also on `--dry-run` and on every resume), before anything changes.
+   Cleanup refuses when `gh` is unavailable or not authenticated; the artifacts
+   worktree is not on its branch; a pull request for the branch was closed without
+   merging; the branch changes files outside the project's own directory since its
+   merge base with the default branch; the artifacts worktree has modified or
+   untracked files (except the `coordination/` evidence an interrupted seal left);
+   or the shared checkout cannot take the merge: it is not on its default branch, it
+   has unpublished commits outside the artifacts root, a local file collides with an
+   upstream change, or the project's final directory already exists there. Ignored
+   files in the artifacts worktree, other than board files, are deleted with it
+   after confirmation.
+2. **Seal**: the project becomes `cleaning`, and the sealed `coordination/` is
+   committed and pushed to the branch. Its manifest names the final directory.
+3. **Publish**: a pull request for the sealed commit is opened (or an open one for
+   that commit reused) and merged with its head pinned to that commit.
+4. **Verify**: the sealed commit is in `origin/<default>` and the local branch is
+   still at it.
+5. **Shared checkout**: its unpublished artifact commits are published, then it is
+   fast-forwarded to hold the sealed commit.
+6. The code worktrees are removed as usual.
+7. **Archive**: one save switches the artifact, board, coordination archive and
+   follow-up paths to the final directory and archives the project.
+8. **Tidy**: the artifacts worktree, local branch and remote branch are removed,
+   best-effort; anything left is printed as a leftover, already merged.
+
+A failure before step 7 leaves the project `cleaning` with every worktree intact,
+and rerunning `baton cleanup` resumes by observation: a merged pull request is not
+merged again. A branch that moved after sealing is refused at step 4.
+
 
 ### Force cleanup
 
@@ -246,6 +291,13 @@ that safely remains an error. Force cleanup does not delete primary checkouts,
 other projects' resources or symlink targets. It does not grant permission to
 modify a coordinator belonging to another repository.
 
+For a project with an artifacts branch, force cleanup opens and merges no pull
+request. It still pushes the preservation commit to the branch, keeps the
+artifacts worktree and branch, reports them as leftovers, and archives the project
+pointing at the worktree, which takes no new artifacts. The sealed coordination
+names the final directory, where the artifacts belong once the user merges the
+branch by hand.
+
 Force cleanup is local only and does not close PRs. With pending abandonment it
 warns that PR closures may be incomplete and releases local resources instead of
 resuming `baton abandon`. Ordinary cleanup continues to resume pending abandonment.
@@ -270,7 +322,10 @@ The summary identifies the project, worktrees, local branches, PR numbers/URLs,
 unmerged work and cleanup warnings. `Abandon this project? [y/N]` requires an
 interactive terminal and explicit `y` or `yes`; no, empty input and EOF cancel.
 After approval Baton closes the listed PRs without comments or remote branch deletion,
-then runs ordinary cleanup. Dirty files, ignored notes and unmerged work can require
+then runs ordinary cleanup, which for a project with an artifacts branch publishes
+and merges that branch's pull request (the summary says so). Creating a project in
+an occupied slot runs the same cleanup on the slot's project, and its prompt says
+so too. Dirty files, ignored notes and unmerged work can require
 a second cleanup confirmation; archive refs and coordination safeguards still apply.
 
 PR closures can succeed even if later closure or cleanup fails. Resume with the

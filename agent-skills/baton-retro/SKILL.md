@@ -208,7 +208,10 @@ Unattended invocations leave publication and commits to the framework. Outside t
 follow the artifact repository's worktree and commit rules. Never stage the board or
 unrelated changes. Report whether the artifact commit was published, remained
 local after a network failure, or was blocked. Do not rebase, merge, or reset
-the shared checkout to resolve divergence.
+the shared checkout to resolve divergence. With `dedicated_artifacts_branch` on,
+an archived project's commit is published through a PR that Baton merges itself;
+a failed publication stays local for the next commit to retry, and you never
+merge that PR. An active project with an `artifacts_branch` commits on that branch.
 
 Report the retro path, whether it was created or updated, archival/conflict
 outcomes, evidence limitations, and the most useful follow-up recommendations.

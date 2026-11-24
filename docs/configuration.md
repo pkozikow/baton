@@ -29,7 +29,9 @@ Settings live in `~/.config/baton/config.json` (`XDG_CONFIG_HOME` and
 Environment overrides win over saved paths, then the defaults apply.
 
 `baton init` creates the default artifact checkout automatically. It is
-local-only; configure a remote separately if publication is needed.
+local-only; configure a remote separately if publication is needed. For a remote
+that accepts changes only through pull requests, see
+[Dedicated artifacts branch](#dedicated-artifacts-branch).
 
 ### Custom artifact repository
 
@@ -77,6 +79,77 @@ in slash-separated components (for example, `team/feature`). A trailing slash is
 optional. The prefix is recorded with each new project and its worktrees; changing
 the setting does not change existing projects, their branches, or subplan paths.
 Existing projects keep their prefix when renamed or extended with new members.
+
+## Dedicated artifacts branch
+
+Artifact commits normally land on the default branch of the shared artifacts
+checkout and are pushed straight to `origin`. An artifacts repository whose default
+branch accepts changes only through pull requests rejects that push. Turn on the
+`dedicated_artifacts_branch` setting for such a repository:
+
+```sh
+baton config set --dedicated-artifacts-branch     # off again: --no-dedicated-artifacts-branch
+baton config show     # includes "dedicated_artifacts_branch"
+```
+
+The setting is a JSON boolean (default `false`); any other value is rejected. Off
+keeps the behavior described elsewhere in these documents unchanged.
+
+Assumptions about the artifacts repository while the setting is on: `origin` is a
+GitHub repository, `gh` is installed and authenticated for it, its pull requests
+need no approval, and it allows merge commits. Baton does not wait for required
+status checks: a pending check fails the merge, and the command is rerun later.
+
+**New projects.** Each project created while the setting is on keeps its
+artifacts on its own branch, `<branch_prefix>/<creation-name>-<uuid8>`, in a
+worktree at `<worktrees_root>/<artifacts-checkout-name>/<creation-name>-<uuid8>`.
+Its plans, board, reviews and other artifacts live inside that worktree (status
+reports `artifacts_branch`); every artifact commit is pushed to that branch.
+`baton cleanup` opens one pull request for the branch, merges it with a merge
+commit pinned to the sealed commit, and archives the project at
+`<artifacts_root>/<creation-name>-<uuid8>` in the shared checkout (see
+[Projects](projects.md#notes-and-cleanup)). The mode is recorded per project at
+creation: changing the setting later never moves an existing project.
+
+**Shared-checkout commits.** Commits without a project branch are still made on
+the shared checkout's default branch: archived projects (unattended retros,
+`artifacts commit`, `review save` or `gdoc` by full UUID), weekly retro summaries,
+and active projects created before the setting was turned on. With the setting on,
+Baton never pushes them to the default branch. It pushes the checkout's `HEAD` to
+`<branch_prefix>/artifacts-<full sha>`, opens a pull request (or reuses an open one
+with the same head commit and base), merges it with a merge commit pinned to that
+commit, deletes the branch, and fast-forwards the checkout. The commit counts as
+published once it is an ancestor of `origin/<default>`, even when the
+fast-forward is blocked. Nothing is published while local commits since the merge
+base change files outside the artifacts root. A failure leaves the commits local
+with a warning, and the next artifact commit retries them. Two cases still need
+the user: a pull request that GitHub cannot merge, and a fast-forward blocked by
+local files.
+
+**Fast-forward rule.** With the setting on, every fast-forward of the shared
+checkout (artifact commits, `gdoc`, unattended retros, cleanup) takes any pure
+fast-forward, including upstream changes outside the artifacts root. When the
+artifacts checkout is also where agents read code or guidance, this deploys those
+upstream changes to every agent. With the setting off, the checkout fast-forwards
+only when the incoming changes are all project artifacts and otherwise warns that
+fast-forwarding would deploy them. Either way, a checkout that is ahead or
+diverged is not fast-forwarded and Git refuses to overwrite local files. A
+project's own artifacts branch is never fast-forwarded to the default branch.
+
+**`gh` under cron.** Unattended retros and `baton retro summarize` run `gh` in the
+Baton process, so `gh` must be authenticated in the cron environment (for example
+through `GH_TOKEN` in the cron job). Without it the commit stays local and the
+warning repeats on every run.
+
+**Merge authority.** Turning the setting on is the user's standing approval for
+Baton itself to merge the pull requests it opens in the artifacts repository, and
+only those: the project pull request from `baton cleanup` (or `baton abandon`) and
+the shared-checkout publication pull requests. Baton merges one only when every
+file changed since the merge base with the default branch is under the artifacts
+root (the project's own directory for a project pull request), only reuses an
+open pull request whose base is the default branch and whose head is the commit it
+checked, and pins the merge to that commit. Agents still run cleanup only when the
+user asks, and never run `gh pr merge` themselves.
 
 ## Repository aliases
 

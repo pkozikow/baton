@@ -100,7 +100,8 @@ anchor, but the anchor shrinks to the text part.
   Markdown too, commit, pull.
 
 `push --dry-run` lists the diagrams it would render. Push refuses unless the
-Markdown is committed, the artifact checkout is up to date with origin, every
+Markdown is committed, the artifact checkout is up to date with origin (a
+project's own artifacts branch needs no sync with the default branch), every
 `image=ID` is in the Doc, and each placeholder is in the Doc exactly once as its
 own paragraph outside tables and lists.
 
@@ -121,7 +122,8 @@ the text just before it. Take IDs from that list.
 | Uncommitted or staged changes | Commit, unstage or discard them; remember rule 1 |
 | Markdown or Doc changed during the pull | Pull again |
 | Image not in the Doc; pull first | Pull, then push |
-| Fetch failed, or checkout behind origin | Retry when the remote is reachable; a checkout that cannot fast-forward needs the user |
+| Fetch failed, or checkout behind origin | Retry when the remote is reachable; a checkout that cannot fast-forward needs the user. With `dedicated_artifacts_branch` on, push first publishes the shared checkout through a PR that Baton merges, so only a PR GitHub cannot merge or a fast-forward blocked by local files needs the user |
+| Pull request publication failed | The commit stays local; it is retried by the next artifact commit or pull. Report it; never merge the PR yourself |
 | Push: the Doc changed while the push ran | Someone edited or commented on the Doc meanwhile; nothing was written. Push again |
 | Push: update may still have been applied | For each listed new image, set the block's mark to `image=ID` without `sha256`, commit; the next push re-renders it. If none is listed, push again |
 | Push: the Doc was updated, commit failed | The file holds the new marks; fix the cause shown, then run the printed `baton artifacts commit` command |
