@@ -512,9 +512,28 @@ class DedicatedCleanupTest(DedicatedFixture):
         refused("unpublished commits outside")
         self.git(self.artifacts, "reset", "-q", "--hard", "HEAD~1")
 
+        self.git(worktree, "switch", "-qc", "elsewhere")
+        refused("not on its branch")
+        self.git(worktree, "switch", "-q", name)
+
         dry = self.cli("cleanup", "p3", "--dry-run")
         self.assertIn("Would clean", dry.stdout)
         self.assertEqual(self.prs(), [])
+
+    def test_ignored_files_other_than_the_board_need_confirmation(self) -> None:
+        project, worktree, name, final = self.started()
+        (self.artifacts / ".git" / "info" / "exclude").write_text("*.log\n")
+        (Path(project["artifacts_path"]) / "debug.log").write_text("Ignored\n")
+        dry = self.cli("cleanup", "p3", "--dry-run", ok=False)
+        self.assertIn("1 ignored files in the artifacts worktree", dry.stderr)
+        self.assertIn("debug.log", dry.stderr)
+        self.assertNotIn("blackboard.sqlite", dry.stderr)
+        refused = self.cli("cleanup", "p3", ok=False)
+        self.assertIn("Interactive confirmation is required", refused.stderr)
+        self.assertEqual(self.project()["state"], "active")
+        self.interactive("cleanup", "p3", reply=b"y\n")
+        self.assertEqual(self.archived()["artifacts_path"], str(final))
+        self.assertFalse(worktree.exists())
 
     def test_unpublished_artifact_commits_in_the_shared_checkout_are_published_by_cleanup(self) -> None:
         project, worktree, name, final = self.started()
