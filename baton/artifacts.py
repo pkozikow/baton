@@ -277,16 +277,20 @@ class ArtifactsMixin(ManagerCore):
         Cleanup's own seal commits go through preserve_blackboard, not here.
         """
         current = None
-        try:
-            record = read_active_project(self.layout / "projects" / f"{project['slot']}.json")
-        except FileNotFoundError:
-            record = {}
-        if record.get("uuid") == project["uuid"]:
-            current = record
+        # An archived record is final, and its old slot may hold an unrelated project by now.
+        if not project.get("_archived"):
+            try:
+                record = read_active_project(self.layout / "projects" / f"{project['slot']}.json")
+            except FileNotFoundError:
+                record = {}
+            if record.get("uuid") == project["uuid"]:
+                current = record
         if current is None:
             current = next((p for p in self.archived_projects() if p["uuid"] == project["uuid"]), project)
         state = "archived" if current.get("_archived") else current.get("state")
-        target = artifacts_branch_name(current)
+        # The caller's own record counts too: read before a cleanup that has since archived the project at its
+        # final path, it would still commit on the merged branch.
+        target = artifacts_branch_name(current) or artifacts_branch_name(project)
         if target is not None and state in ("cleaning", "archived"):
             raise ProjectError(f"Project {current['name']} is {state} and its artifacts branch {target} is sealed; "
                                "it takes no new artifacts.")
@@ -459,11 +463,21 @@ class ArtifactsMixin(ManagerCore):
                   "ask the user to do that. Agents never rebase, merge or reset this shared checkout." if reconcile else "")
         print(f"baton: warning: {detail}{action}", file=sys.stderr, flush=True)
 
+    @staticmethod
+    def changed_paths(root: Path, old: str, new: str) -> list[str]:
+        """Paths changed between two commits, exactly as Git names them."""
+        # Not through git(): it strips its output, which would drop a first path's leading whitespace.
+        result = subprocess.run(["git", "-C", str(root), "diff", "--name-only", "--no-renames", "-z", old, new],
+                                text=True, capture_output=True)
+        if result.returncode:
+            raise ProjectError(result.stderr.strip() or f"Cannot compare {old} and {new} in {root}.")
+        return [name for name in result.stdout.split("\0") if name]
+
     def non_artifact_paths(self, root: Path, old: str, new: str, *,
                            artifacts_root: Path | None = None) -> list[str]:
         """Use the selected project's historical artifact root, even after configuration changes."""
         allowed = artifacts_root if artifacts_root is not None else self.artifacts
-        names = [name for name in git(root, "diff", "--name-only", "--no-renames", "-z", old, new).split("\0") if name]
+        names = self.changed_paths(root, old, new)
         try:
             prefix = allowed.resolve().relative_to(root.resolve()).as_posix()
         except ValueError:
@@ -473,14 +487,13 @@ class ArtifactsMixin(ManagerCore):
             return []
         return [name for name in names if not name.startswith(prefix + "/")]
 
-    @staticmethod
-    def outside_directory(root: Path, old: str, new: str, directory: Path) -> list[str]:
+    def outside_directory(self, root: Path, old: str, new: str, directory: Path) -> list[str]:
         """Paths changed between two commits that are not under directory, judged by path names alone.
 
         Baton merges pull requests on this answer, so unlike non_artifact_paths it never resolves the checkout's
         files: a symlink there must not be able to widen what is allowed.
         """
-        names = [name for name in git(root, "diff", "--name-only", "--no-renames", "-z", old, new).split("\0") if name]
+        names = self.changed_paths(root, old, new)
         try:
             prefix = directory.relative_to(root).as_posix()
         except ValueError:

@@ -262,6 +262,12 @@ class SessionsMixin(ManagerCore):
         provider: Provider = PROVIDERS[owner["provider"]]
         session_id = owner["session_id"] if provider.supports_fork else None
         directory = self.validate_retro_directory(project)
+        try:
+            # Before any model run: a sealed artifacts branch could not take the retrospective's commit.
+            self.require_open_artifacts(project)
+        except ProjectError as error:
+            return {"uuid": project["uuid"], "status": "blocked", "returncode": 1, "provider": provider.name,
+                    "error": str(error)}
         workspace = create_draft_workspace()
         try:
             draft = workspace / "retro.md"

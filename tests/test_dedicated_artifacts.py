@@ -362,6 +362,42 @@ class DedicatedArtifactsTest(DedicatedFixture):
         self.assertEqual(self.git(Path(project["artifacts_branch"]["path"]), "rev-parse", "HEAD"),
                          project["artifacts_branch"]["base_sha"])
 
+    def test_a_project_sealed_after_the_first_check_is_refused_under_the_commit_lock(self) -> None:
+        self.create("alpha")
+        project = self.project()
+        plan = Path(project["artifacts_path"]) / "plan.md"
+        plan.write_text("Plan\n")
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            manager = Manager()
+            manager.load()
+            check, calls = manager.require_open_artifacts, []
+
+            def cleanup_starts_after_the_first_check(current: dict) -> None:
+                calls.append(current["uuid"])
+                if len(calls) == 1:
+                    state_file(self.projects).write_text(json.dumps(dict(project, state="cleaning")))
+                else:
+                    check(current)
+
+            with mock.patch.object(manager, "require_open_artifacts", cleanup_starts_after_the_first_check):
+                with self.assertRaisesRegex(ProjectError, "is cleaning and its artifacts branch"):
+                    manager.commit_artifacts(manager.project("p3"), "Add plan", [str(plan)])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(self.git(Path(project["artifacts_branch"]["path"]), "rev-parse", "HEAD"),
+                         project["artifacts_branch"]["base_sha"])
+
+    def test_paths_with_leading_whitespace_are_judged_by_their_exact_names(self) -> None:
+        self.create("alpha")
+        worktree = Path(self.project()["artifacts_branch"]["path"])
+        outside = worktree / " inside"
+        outside.mkdir()
+        (outside / "code.py").write_text("print('outside')\n")
+        self.git(worktree, "add", "-A")
+        self.git(worktree, "commit", "-qm", "Add a directory whose name starts with a space")
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            manager = Manager()
+        self.assertEqual(manager.outside_directory(worktree, "HEAD~1", "HEAD", worktree / "inside"), [" inside/code.py"])
+
     def test_branch_checkouts_still_commit_only_their_own_subplan(self) -> None:
         self.make_repo("beta")
         self.create("alpha", "beta")
@@ -638,6 +674,22 @@ class DedicatedCleanupTest(DedicatedFixture):
         self.assertTrue(worktree.is_dir())
         self.git(self.origin, "rev-parse", "--verify", f"refs/heads/{name}", ok=False)
 
+    def test_a_record_read_before_archiving_cannot_commit_on_the_merged_branch(self) -> None:
+        project, worktree, name, final = self.started()
+        # Tidy fails on the locked worktree, as if a commit raced the gap between archiving and tidy.
+        self.git(self.artifacts, "worktree", "lock", str(worktree))
+        self.cli("cleanup", "p3")
+        self.assertEqual(self.archived()["artifacts_path"], str(final))
+        tip = self.git(worktree, "rev-parse", "HEAD")
+        late = Path(project["artifacts_path"]) / "late.md"
+        late.write_text("Late\n")
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            manager = Manager()
+            manager.load()
+            with self.assertRaisesRegex(ProjectError, "is archived and its artifacts branch"):
+                manager.commit_artifacts(project, "Late", [str(late)])
+        self.assertEqual(self.git(worktree, "rev-parse", "HEAD"), tip)
+
     def test_a_branch_moved_after_sealing_is_refused_at_verify(self) -> None:
         project, worktree, name, final = self.started()
         directory = Path(project["artifacts_path"])
@@ -718,7 +770,32 @@ class DedicatedCleanupTest(DedicatedFixture):
         self.cli("cleanup", "p3", ok=False)
         self.assertTrue(self.project()["coordination_archive"]["commit"])
         (self.root / "gh.log").unlink()
-        self.assert_force_retained(self.force(), project, worktree, name)
+        result = self.force()
+        self.assertIn("Merge the branch by hand", result.stderr)
+        self.assert_force_retained(result, project, worktree, name)
+
+    def test_unattended_retro_of_a_force_retained_project_is_blocked_before_any_model_run(self) -> None:
+        project, worktree, name, final = self.started()
+        owner = {"provider": "claude", "session_id": str(uuid.uuid4()), "claimed_at": "2026-01-01T00:00:00+00:00"}
+        state_file(self.projects).write_text(json.dumps(dict(self.project(), owner=owner)))
+        self.force()
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            manager = Manager()
+            result = manager.retro_noninteractive(project["uuid"])
+        self.assertEqual((result["status"], result["provider"]), ("blocked", "claude"))
+        self.assertIn("sealed", result["error"])
+        self.assertFalse((Path(project["artifacts_path"]) / "retro.md").exists())
+
+    def test_force_cleanup_after_the_merge_says_the_branch_is_already_merged(self) -> None:
+        project, worktree, name, final = self.started()
+        # The shared-checkout step fails after the merge, leaving the project in cleanup.
+        self.after_merge(f"mkdir -p {shlex.quote(str(final))} && echo Local > {shlex.quote(str(final / 'plan.md'))}")
+        self.cli("cleanup", "p3", ok=False)
+        self.assertEqual([pr["state"] for pr in self.prs()], ["MERGED"])
+        result = self.force()
+        self.assertIn("The branch is already merged", result.stderr)
+        self.assertNotIn("Merge the branch by hand", result.stderr)
+        self.assertEqual(self.archived()["artifacts_path"], project["artifacts_path"])
 
 
 class SharedCheckoutPublicationTest(DedicatedFixture):

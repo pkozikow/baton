@@ -51,7 +51,7 @@ class ForceCleanupMixin(ManagerCore):
         artifacts_record = project.get('artifacts_branch')
         if artifacts_record:
             print(f"  Retain artifacts worktree {artifacts_record['path']} and branch {artifacts_record['branch']}; "
-                  "no pull request is opened or merged.")
+                  "force cleanup opens and merges no pull request.")
         if project['state'] not in ('active', 'cleaning'):
             warn(f"Project is {project['state']}; unfinished operations will not be resumed.")
         if any(key.startswith('pending_') and value for key, value in project.items()):
@@ -144,10 +144,16 @@ class ForceCleanupMixin(ManagerCore):
             except FORCE_FAILURES as error:
                 warn(f"Coordination archive failed: {error}. Shared artifacts and the live board remain in place.")
         if artifacts_record:
-            warn(f"Leftover artifacts worktree {artifacts_record['path']} and branch {artifacts_record['branch']} "
-                 f"(pushed to origin/{artifacts_record['branch']} when the push succeeded): force cleanup merges "
-                 "nothing, and the archived project keeps pointing at the worktree. Merge the branch by hand; its "
-                 f"sealed coordination names {artifacts_record['final_path']} as the project's intended location.")
+            leftover = (f"Leftover artifacts worktree {artifacts_record['path']} and branch "
+                        f"{artifacts_record['branch']}: the archived project keeps pointing at the worktree. ")
+            if self.force_artifacts_merged(project):
+                # An earlier ordinary cleanup got as far as merging the branch.
+                warn(leftover + f"The branch is already merged, so its content is at {artifacts_record['final_path']} "
+                                "once the shared artifacts checkout is up to date; remove the worktree and branch by hand.")
+            else:
+                warn(leftover + f"Force cleanup merges nothing (the branch is on origin/{artifacts_record['branch']} "
+                                "when its push succeeded). Merge the branch by hand; its sealed coordination names "
+                                f"{artifacts_record['final_path']} as the project's intended location.")
         for entry in reversed(project_entries(project)):
             safe, identity, tip = snapshots[str(entry['path'])]
             if not safe:
@@ -179,6 +185,15 @@ class ForceCleanupMixin(ManagerCore):
                 active.unlink(missing_ok=True)
                 self.state['projects'].pop(project['slot'], None)
         print(f"Slot {project['slot']} is ready for another project.")
+
+    @staticmethod
+    def force_artifacts_merged(project: dict[str, Any]) -> bool:
+        """Whether the sealed artifacts branch is in the default branch, as far as the last fetch knows."""
+        sealed = (project.get('coordination_archive') or {}).get('commit')
+        source = Path(project['artifacts_branch']['source'])
+        upstream = sealed and git(source, 'symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD', check=False)
+        return bool(upstream) and subprocess.run(['git', '-C', str(source), 'merge-base', '--is-ancestor', sealed, upstream],
+                                                 capture_output=True).returncode == 0
 
     def force_artifact_directory(self, project: dict[str, Any]) -> Path:
         directory = self.validate_retro_directory(project)
