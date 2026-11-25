@@ -1118,6 +1118,25 @@ class SharedCheckoutPullRequestGdocTest(unittest.TestCase):
         self.assertNotIn("Pushed", result.stdout)
         self.assert_published("Pull spec.md from its Google Doc", 1)
 
+    def test_squash_pull_can_build_on_a_locally_saved_doc(self) -> None:
+        path = self.linked("spec.md", "old\n")
+        self.cli("artifacts", "commit", "--selector", "example", "-m", "Publish the link", str(path))
+        self.cli("config", "set", "--artifacts-merge-method", "squash")
+        (self.root / "gh-merge-methods.json").write_text('["squash"]')
+        base = self.git(self.artifacts, "rev-parse", "HEAD")
+
+        self.serve(document("First."), "First.\n")
+        self.gdoc("pull", "--no-push")
+        self.assertEqual(self.git(self.artifacts, "rev-parse", "HEAD"), base)
+        self.serve(document("Second."), "Second.\n")
+        self.gdoc("pull")
+
+        pr = json.loads(self.pull_requests.read_text())[-1]
+        self.assertEqual(pr["state"], "MERGED")
+        self.assertEqual(self.git(self.artifacts, "rev-parse", "HEAD"), pr["mergeCommit"]["oid"])
+        self.assertTrue(path.read_text().endswith("Second.\n"))
+        self.assertEqual(self.git(self.artifacts, "status", "--porcelain"), "")
+
     def test_push_from_an_unpublished_checkout_publishes_it_first(self) -> None:
         # The link commits are local, and origin/main moved on: the checkout is ahead and behind.
         path, doc = self.three_diagrams()

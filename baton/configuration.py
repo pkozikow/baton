@@ -51,6 +51,13 @@ def configured_dedicated_artifacts_branch(config: dict[str, Any]) -> bool:
     return value
 
 
+def configured_artifacts_merge_method(config: dict[str, Any]) -> str:
+    value = config.get("artifacts_merge_method", "merge")
+    if value not in ("merge", "squash"):
+        raise ValueError("artifacts_merge_method must be merge or squash")
+    return value
+
+
 def config_path(environ: Mapping[str, str] | None = None) -> Path:
     environment = os.environ if environ is None else environ
     home = Path(environment.get("HOME", str(Path.home())))
@@ -98,6 +105,7 @@ def read_config(*, validate_model_references: bool = True) -> dict[str, Any]:
         raise ValueError(f"{error} in {config_path()}") from error
     configured_branch_prefix(config)
     configured_dedicated_artifacts_branch(config)
+    configured_artifacts_merge_method(config)
     validate_repo_aliases(config.get("repo_aliases", {}))
     validate_model_tiers(config.get("model_tiers", {}))
     validate_model_tier_effort(config.get("model_tier_effort", {}))
@@ -183,6 +191,8 @@ def main(argv: list[str] | None = None) -> int:
                            const=True, help="Keep each new project's artifacts on its own branch and pull request")
     dedicated.add_argument("--no-dedicated-artifacts-branch", dest="dedicated_artifacts_branch", action="store_const",
                            const=False, help="Commit new projects' artifacts on the shared checkout (default)")
+    setter.add_argument("--artifacts-merge-method", choices=("merge", "squash"),
+                        help="Merge method for artifact pull requests (default: merge)")
     focused_reviews = setter.add_mutually_exclusive_group()
     focused_reviews.add_argument("--review-focus", action="append", metavar="NAME",
                                  help="Replace focused review catalog names (repeatable; order is preserved)")
@@ -251,6 +261,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.selector and (args.repo_alias or args.remove_repo_alias or args.model_tier
                     or args.remove_model_tier or args.model_tier_effort or args.remove_model_tier_effort
                     or args.branch_prefix is not None or args.dedicated_artifacts_branch is not None
+                    or args.artifacts_merge_method is not None
                     or any(getattr(args, key) is not None for key in PATH_OPTIONS)
                     or any(getattr(args, key) or getattr(args, "remove_" + key) for key in MODEL_OPTIONS)):
                 raise ValueError("Project --selector accepts only review-loop flags")
@@ -283,8 +294,8 @@ def main(argv: list[str] | None = None) -> int:
             if (not changes and not args.repo_alias and not args.remove_repo_alias and not model_changes
                     and not model_removals and not tier_changes and not tier_removals and not effort_changes
                     and not effort_removals and args.branch_prefix is None and args.dedicated_artifacts_branch is None
-                    and not loop_mutation and not args.inherit_review_loop):
-                parser.error("specify at least one path, branch prefix, artifacts branch mode, alias, model, tier, "
+                    and args.artifacts_merge_method is None and not loop_mutation and not args.inherit_review_loop):
+                parser.error("specify at least one path, branch prefix, artifacts setting, alias, model, tier, "
                              "or review-loop change")
             aliases = dict(config.get("repo_aliases", {}))
             additions = {}
@@ -304,6 +315,8 @@ def main(argv: list[str] | None = None) -> int:
                 config["branch_prefix"] = configured_branch_prefix({"branch_prefix": args.branch_prefix})
             if args.dedicated_artifacts_branch is not None:
                 config["dedicated_artifacts_branch"] = args.dedicated_artifacts_branch
+            if args.artifacts_merge_method is not None:
+                config["artifacts_merge_method"] = args.artifacts_merge_method
             if changes:
                 config.setdefault("paths", {}).update(changes)
             if args.repo_alias or args.remove_repo_alias:
@@ -399,6 +412,7 @@ def main(argv: list[str] | None = None) -> int:
             "artifacts_root": str(manager.artifacts)}, "repo_aliases": dict(manager.repo_aliases),
             "branch_prefix": manager.branch_prefix,
             "dedicated_artifacts_branch": manager.dedicated_artifacts_branch,
+            "artifacts_merge_method": manager.artifacts_merge_method,
             "providers": provider_settings(), "model_tiers": config.get("model_tiers", {}),
             "model_tier_effort": config.get("model_tier_effort", {}),
             "resolved_worker_effort": resolved_worker_efforts(config),

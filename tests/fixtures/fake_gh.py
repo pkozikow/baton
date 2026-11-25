@@ -3,7 +3,7 @@
 Usage: fake_gh.py ROOT ARGS...; pull requests live in ROOT/gh-prs.json and github.com/OWNER/NAME maps to
 ROOT/NAME.git. Files under ROOT change its behavior: gh-offline fails every call, gh-fail-merge fails a merge without
 merging, gh-fail-after-merge merges and then fails, and gh-after-merge.sh runs once after a merge with BATON_PID set
-to the calling process (to kill it, or to change a checkout at that point). Every call is appended to ROOT/gh.log.
+to the calling process. gh-merge-methods.json restricts merge methods. Every call is appended to ROOT/gh.log.
 """
 
 import json
@@ -50,7 +50,16 @@ def current(pr: dict[str, Any]) -> dict[str, Any]:
     return dict(pr, headRefOid=oid or pr["headRefOid"])
 
 
-if args[:2] == ["pr", "list"]:
+policy = root / "gh-merge-methods.json"
+methods = json.loads(policy.read_text()) if policy.exists() else ["merge", "squash"]
+merge_flags = {"--merge": "merge", "--squash": "squash"}
+
+if args[:1] == ["api"] and args[1].startswith("repos/"):
+    setting = {".allow_merge_commit": "merge", ".allow_squash_merge": "squash"}.get(option("--jq"))
+    if setting is None:
+        sys.exit("unsupported fake gh repository setting")
+    print(json.dumps(setting in methods))
+elif args[:2] == ["pr", "list"]:
     states = {"open": ["OPEN"], "closed": ["CLOSED", "MERGED"], "merged": ["MERGED"],
               "all": ["OPEN", "CLOSED", "MERGED"]}[option("--state") or "open"]
     print(json.dumps([current(pr) for pr in prs if pr["repository"] == repository
@@ -67,7 +76,10 @@ elif args[:2] == ["pr", "create"]:
                 "body": option("--body")})
     save()
     print(url)
-elif args[:2] == ["pr", "merge"] and "--merge" in args:
+elif args[:2] == ["pr", "merge"] and set(merge_flags) & set(args):
+    method = next(value for flag, value in merge_flags.items() if flag in args)
+    if method not in methods:
+        sys.exit(f"{method} merges are not allowed")
     pr = next(pr for pr in prs if pr["repository"] == repository and pr["number"] == int(args[2]))
     if (root / "gh-fail-merge").exists():
         sys.exit("merge failed")
@@ -78,7 +90,8 @@ elif args[:2] == ["pr", "merge"] and "--merge" in args:
         sys.exit("head branch was modified; review and try the merge again")
     base = run("rev-parse", "refs/heads/" + pr["baseRefName"])
     tree = run("merge-tree", "--write-tree", base, head)
-    commit = run("commit-tree", tree, "-p", base, "-p", head, "-m", f"Merge pull request #{pr['number']}")
+    parents = ["-p", base] if method == "squash" else ["-p", base, "-p", head]
+    commit = run("commit-tree", tree, *parents, "-m", f"Merge pull request #{pr['number']}")
     run("update-ref", "refs/heads/" + pr["baseRefName"], commit, base)
     pr.update(state="MERGED", headRefOid=head, mergeCommit={"oid": commit})
     save()

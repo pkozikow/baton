@@ -8,6 +8,7 @@ import re
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from typing import Any, Callable
@@ -171,7 +172,9 @@ class ArtifactsMixin(ManagerCore):
                 raise ProjectError("Coordination archive identity/schema differs from this project; cleanup blocked.")
         board = self.board_for(project)
         if archive and not archive.get("uninitialized") and not archive.get("commit"):
-            previous = git(root, "log", "-1", "--format=%H", "--", *relative)
+            target = artifacts_branch_name(project)
+            tip = "HEAD" if target else self.artifact_commit_tip(root)
+            previous = git(root, "log", "-1", "--format=%H", tip, "--", *relative)
             if previous:
                 try:
                     self.verify_archive_commit(root, previous, relative, archive.get("checksums", {}))
@@ -219,9 +222,10 @@ class ArtifactsMixin(ManagerCore):
             "checksums": {name: revision_of((directory / name).read_bytes()) for name in names}}
         self.save()
         target = artifacts_branch_name(project)
-        self.commit_artifact_paths(root, "Preserve sealed project coordination", relative, push=False, sync=False,
-                                   artifacts_root=self.artifact_directory(project).parent, expected_branch=target)
-        commit = git(root, "rev-parse", "HEAD")
+        preserved = self.commit_artifact_paths(root, "Preserve sealed project coordination", relative, push=False,
+                                               sync=False, artifacts_root=self.artifact_directory(project).parent,
+                                               expected_branch=target)
+        commit = str(preserved.get("commit") or git(root, "rev-parse", "HEAD"))
         archive = project["coordination_archive"]
         self.verify_archive_commit(root, commit, relative, archive["checksums"])
         archive["commit"] = commit
@@ -343,13 +347,21 @@ class ArtifactsMixin(ManagerCore):
                               sync: bool = True, artifacts_root: Path | None = None,
                               prepare: Callable[[], None] | None = None,
                               after_commit: Callable[[], None] | None = None,
-                              expected_branch: str | None = None) -> dict[str, bool]:
+                              expected_branch: str | None = None) -> dict[str, bool | str]:
         """Commit on the default branch of the shared checkout, or on a project's artifacts branch.
 
         A project branch has a single writer checkout, so it is neither synced nor compared with origin: the commit
         is pushed to origin/<branch>, which creates it on the first push.
         """
         default = self.artifact_checkout(root, relative, expected_branch)
+        if expected_branch is None:
+            if self.dedicated_artifacts_branch and self.artifacts_merge_method == "squash":
+                return self.commit_shared_squash(root, default, message, relative, push=push, sync=sync,
+                                                allowed=artifacts_root or self.artifacts, prepare=prepare,
+                                                after_commit=after_commit)
+            pending = self.pending_artifact_ref(default)
+            if git(root, "rev-parse", "--verify", pending, check=False):
+                raise ProjectError("Finish the pending squash publication before changing the artifact settings.")
         remote = push and "origin" in git(root, "remote").splitlines()
         requested = relative
 
@@ -585,14 +597,180 @@ class ArtifactsMixin(ManagerCore):
             print(f"Pushed {ahead} artifact commit{'s' if ahead != 1 else ''} to origin/{default}.", flush=True)
         return pushed.returncode == 0
 
+    @staticmethod
+    def pending_artifact_ref(default: str) -> str:
+        return f"refs/baton/artifacts-pending/{default}"
+
+    @staticmethod
+    def submitted_artifact_ref(root: Path, default: str) -> str:
+        refs = git(root, "for-each-ref", "--format=%(refname)",
+                   f"refs/baton/artifacts-submitted/{default}/").splitlines()
+        if len(refs) > 1:
+            raise ProjectError(f"Multiple artifact publications are pending in {root}; preserve and inspect their refs.")
+        return refs[0] if refs else ""
+
+    def artifact_commit_tip(self, root: Path) -> str:
+        pending = self.pending_artifact_ref(branch(root))
+        return git(root, "rev-parse", "--verify", pending, check=False) or git(root, "rev-parse", "HEAD")
+
+    def commit_shared_squash(self, root: Path, default: str, message: str, relative: list[str], *,
+                            push: bool, sync: bool, allowed: Path, prepare: Callable[[], None] | None,
+                            after_commit: Callable[[], None] | None) -> dict[str, bool | str]:
+        upstream = f"refs/remotes/origin/{default}"
+        pending_ref = self.pending_artifact_ref(default)
+        with self.artifacts_lock(root):
+            self.artifact_checkout(root, relative)
+            if any(git(root, "rev-parse", "--verify", ref, check=False)
+                   for ref in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD")):
+                raise ProjectError(f"Finish the Git operation in {root} before staging squash publications.")
+            remote = "origin" in git(root, "remote").splitlines()
+            fetched = remote and push and (not sync or self.fetch_artifacts(root, default))
+            pending = git(root, "rev-parse", "--verify", pending_ref, check=False)
+            if self.submitted_artifact_ref(root, default):
+                if fetched:
+                    self.publish_shared_squash(root, default, allowed)
+                pending = git(root, "rev-parse", "--verify", pending_ref, check=False)
+                if pending:
+                    raise ProjectError(f"Finish the pending artifact publication at {pending[:12]} before saving "
+                                       f"more files. Pending commits and working files are still in {root}.")
+            if fetched and not pending:
+                self.fast_forward_artifacts(root, default, artifacts_root=allowed, any_change=True)
+            head = git(root, "rev-parse", "HEAD")
+            if remote and not self.is_ancestor(root, head, upstream):
+                raise ProjectError(f"{root} has no usable origin/{default} or has unpublished commits on {default}. "
+                                   "Reconcile the shared checkout before staging squash publications.")
+            if prepare is not None:
+                prepare()
+            tip = pending or head
+            # Build the next commit with a separate index. Local main and unrelated staged files stay as they were.
+            with tempfile.TemporaryDirectory(prefix="baton-artifacts-index-") as temp:
+                env = dict(os.environ, GIT_INDEX_FILE=str(Path(temp) / "index"))
+
+                def isolated_git(*args: str) -> str:
+                    result = subprocess.run(["git", "-C", str(root), "--literal-pathspecs", *args], env=env,
+                                            text=True, capture_output=True)
+                    if result.returncode:
+                        raise ProjectError(result.stderr.strip() or result.stdout.strip())
+                    return result.stdout.strip()
+
+                isolated_git("read-tree", tip)
+                staged = []
+                for path in relative:
+                    if (root / path).exists() or isolated_git("ls-files", "--", path):
+                        staged.append(path)
+                    elif not isolated_git("rev-list", "-1", tip, "--", path):
+                        raise ProjectError(f"Artifact path does not exist and has no history: {path}")
+                if staged:
+                    isolated_git("add", "-A", "--", *staged)
+                tree = isolated_git("write-tree")
+                if tree != git(root, "rev-parse", f"{tip}^{{tree}}"):
+                    tip = isolated_git("commit-tree", tree, "-p", tip, "-m", message)
+                    git(root, "update-ref", pending_ref, tip, pending)
+                    print(f"Committed {tip[:12]} for artifact publication in {root}.", flush=True)
+            if after_commit is not None:
+                after_commit()
+            published = fetched and self.publish_shared_squash(root, default, allowed)
+            if push and not fetched:
+                self.artifact_warning(root, default, "Artifact commits are saved locally for the next publication.")
+            return {"published": bool(published), "fetch_succeeded": bool(fetched), "commit": tip}
+
+    def publish_shared_squash(self, root: Path, default: str, allowed: Path) -> bool:
+        """Publish and reconcile a pending snapshot while holding the shared checkout's artifact lock."""
+        pending_ref = self.pending_artifact_ref(default)
+        submitted_prefix = f"refs/baton/artifacts-submitted/{default}/"
+        sha = git(root, "rev-parse", "--verify", pending_ref, check=False)
+        if not sha:
+            self.fast_forward_artifacts(root, default, artifacts_root=allowed, any_change=True)
+            return self.artifact_divergence(root, default) == (0, 0)
+        submitted_ref = self.submitted_artifact_ref(root, default)
+        if submitted_ref:
+            if git(root, "rev-parse", "--verify", submitted_ref) != sha:
+                raise ProjectError(f"Artifact publication refs disagree in {root}; preserve both and inspect them.")
+            name = submitted_ref.removeprefix(submitted_prefix)
+        else:
+            upstream = f"refs/remotes/origin/{default}"
+            base = git(root, "merge-base", upstream, sha, check=False)
+            if base and not self.changed_paths(root, base, sha):
+                self.retain_artifact_commit(root, sha)
+                git(root, "update-ref", "-d", pending_ref, sha)
+                self.fast_forward_artifacts(root, default, artifacts_root=allowed, any_change=True)
+                return True
+            name = f"{self.branch_prefix}/artifacts-{sha}"
+            submitted_ref = submitted_prefix + name
+            # Pin the batch and its branch name before a merge attempt.
+            git(root, "update-ref", submitted_ref, sha, "")
+        published = self.merge_artifacts_pr(
+            root, default, name, sha, allowed, title=f"Publish artifact commits up to {sha[:12]}",
+            body="Opened by Baton to publish only files under the shared checkout's artifacts root.")
+        if not published:
+            return False
+        self.retain_artifact_commit(root, sha)
+        if not self.sync_shared_squash(root, default, sha, published):
+            return True
+        result = subprocess.run(["git", "-C", str(root), "update-ref", "--stdin"],
+                                input=f"delete {pending_ref} {sha}\ndelete {submitted_ref} {sha}\n",
+                                text=True, capture_output=True)
+        if result.returncode:
+            raise ProjectError(result.stderr.strip())
+        self.fast_forward_artifacts(root, default, artifacts_root=allowed, any_change=True)
+        return True
+
+    @staticmethod
+    def retain_artifact_commit(root: Path, sha: str) -> None:
+        git(root, "update-ref", f"refs/baton/artifacts-published/{sha}", sha)
+
+    def sync_shared_squash(self, root: Path, default: str, sha: str, published: str) -> bool:
+        head = git(root, "rev-parse", "HEAD")
+        if branch(root) != default or not (self.is_ancestor(root, head, published) or
+                                           self.is_ancestor(root, published, head)):
+            self.artifact_warning(root, default, f"Artifact publication {published[:12]} landed, but the shared "
+                                  "checkout has diverged. Reconcile it before retrying.")
+            return False
+        if self.is_ancestor(root, published, head):
+            return True
+
+        base = git(root, "merge-base", head, sha)
+        changes = set(self.changed_paths(root, head, published))
+        paths = [path for path in self.changed_paths(root, base, sha) if path in changes]
+
+        def differs(*args: str) -> bool:
+            result = subprocess.run(["git", "-C", str(root), "--literal-pathspecs", "diff", "--quiet", *args,
+                                     "--", *paths], capture_output=True)
+            if result.returncode not in (0, 1):
+                raise ProjectError(result.stderr.decode().strip())
+            return bool(result.returncode)
+
+        staged = bool(paths) and differs("--cached", head)
+        if paths and (differs(sha, published) or (staged and differs("--cached", published))):
+            self.artifact_warning(root, default, f"Artifact publication {published[:12]} landed, but it overlaps "
+                                  "with staged files or upstream edits. Resolve those before retrying.")
+            return False
+        if paths and not staged:
+            # Carry through the exact published index entries; later working-copy edits stay unstaged.
+            git(root, "--literal-pathspecs", "restore", "--staged", f"--source={published}", "--", *paths)
+        try:
+            git(root, "-c", "core.hooksPath=/dev/null", "merge", "--ff-only", "--no-overwrite-ignore", "--quiet", published)
+        except ProjectError as error:
+            if paths and not staged and git(root, "rev-parse", "HEAD") == head and not differs("--cached", published):
+                git(root, "--literal-pathspecs", "restore", "--staged", f"--source={head}", "--", *paths)
+            self.artifact_warning(root, default, f"Artifact publication {published[:12]} landed, but the shared "
+                                  f"checkout could not fast-forward. {error}")
+            return False
+        return True
+
     def publish_artifacts(self, root: Path, default: str, *, artifacts_root: Path | None = None) -> bool:
         """Publish the shared checkout's HEAD through one merged pull request, then fast-forward the checkout.
 
         Returns whether that HEAD is an ancestor of the fetched origin/<default>, even when the fast-forward is
         blocked. Nothing is ever pushed to the default branch itself.
         """
-        sha = git(root, "rev-parse", "HEAD")
         allowed = artifacts_root if artifacts_root is not None else self.artifacts
+        if self.artifacts_merge_method == "squash":
+            with self.artifacts_lock(root):
+                return self.publish_shared_squash(root, default, allowed)
+        if git(root, "rev-parse", "--verify", self.pending_artifact_ref(default), check=False):
+            raise ProjectError("Finish the pending squash publication before changing the artifact merge method.")
+        sha = git(root, "rev-parse", "HEAD")
         published = self.merge_artifacts_pr(
             root, default, f"{self.branch_prefix}/artifacts-{sha}", sha, allowed,
             title=f"Publish artifact commits up to {sha[:12]}",
@@ -603,7 +781,7 @@ class ArtifactsMixin(ManagerCore):
                 # A commit that landed meanwhile is published, and synchronizes the checkout, on its own turn.
                 if git(root, "rev-parse", "HEAD") == sha:
                     self.fast_forward_artifacts(root, default, artifacts_root=allowed, any_change=True)
-        return published
+        return bool(published)
 
     @staticmethod
     def is_ancestor(root: Path, commit: str, ref: str) -> bool:
@@ -619,10 +797,22 @@ class ArtifactsMixin(ManagerCore):
         except (OSError, subprocess.TimeoutExpired) as error:
             return subprocess.CompletedProcess(["gh", *args], 124, "", str(error))
 
+    def check_artifacts_merge_method(self, root: Path, repository: str) -> None:
+        repository_path = repository.removeprefix("github.com/")
+        setting = "allow_squash_merge" if self.artifacts_merge_method == "squash" else "allow_merge_commit"
+        result = self.gh(root, "api", f"repos/{repository_path}", "--jq", f".{setting}", timeout=30)
+        if result.returncode or result.stdout.strip() not in ("true", "false"):
+            raise ProjectError(f"Cannot verify the allowed artifact merge methods in {repository}. "
+                               f"{result.stderr.strip()}")
+        if result.stdout.strip() == "false":
+            raise ProjectError(f"{repository} disallows Baton's configured artifacts merge method "
+                               f"{self.artifacts_merge_method!r}; choose an allowed method with "
+                               "baton config set --artifacts-merge-method.")
+
     def artifacts_prs(self, root: Path, repository: str, name: str) -> list[dict[str, Any]]:
         """Every pull request, in any state, whose head is this branch of the repository itself, not of a fork."""
         listed = self.gh(root, "pr", "list", "--repo", repository, "--head", name, "--state", "all", "--limit", "100",
-                         "--json", "number,url,state,headRefName,headRefOid,baseRefName,isCrossRepository",
+                         "--json", "number,url,state,headRefName,headRefOid,baseRefName,isCrossRepository,mergeCommit",
                          timeout=30)
         if listed.returncode:
             raise ProjectError(f"Cannot list pull requests for {name} in {repository} with gh; check that gh is "
@@ -640,75 +830,104 @@ class ArtifactsMixin(ManagerCore):
         # gh matches --head by branch name alone, so a fork's branch of the same name is listed too.
         return [pr for pr in prs if pr["headRefName"] == name and not pr.get("isCrossRepository")]
 
-    def merge_artifacts_pr(self, root: Path, default: str, name: str, sha: str, allowed: Path, *,
-                           title: str, body: str, keep_branch: bool = False) -> bool:
-        """Get commit sha into origin/<default> through a pull request from branch name, merged with a merge commit.
+    @staticmethod
+    def matching_artifacts_merge(pr: dict[str, Any], default: str, name: str, sha: str) -> bool:
+        return (pr["state"] == "MERGED" and pr.get("isCrossRepository") is False
+                and pr["headRefName"] == name and pr["headRefOid"] == sha and pr["baseRefName"] == default)
 
-        Baton merges only these pull requests, so every file changed since the merge base must be under allowed, and
-        the merge is pinned to sha. Returns whether sha is an ancestor of origin/<default>; failures are warnings
-        and leave the commits where they were.
-        """
+    def published_artifacts_tip(self, root: Path, default: str, name: str, sha: str,
+                                prs: list[dict[str, Any]]) -> str | None:
+        """Return an exact-head publication commit reachable from the fetched default branch."""
+        upstream = f"refs/remotes/origin/{default}"
+        if self.is_ancestor(root, sha, upstream):
+            return sha
+        for pr in prs:
+            if not self.matching_artifacts_merge(pr, default, name, sha):
+                continue
+            commit = pr.get("mergeCommit")
+            oid = commit.get("oid") if isinstance(commit, dict) else None
+            if isinstance(oid, str) and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", oid):
+                if self.is_ancestor(root, oid, upstream):
+                    return oid
+        return None
+
+    def merge_artifacts_pr(self, root: Path, default: str, name: str, sha: str, allowed: Path, *,
+                           title: str, body: str, keep_branch: bool = False) -> str | None:
+        """Publish a pinned, scoped commit by PR and return the commit proving it on origin/<default>."""
         upstream = f"refs/remotes/origin/{default}"
         # Already published as far as the last fetch knows: nothing to do, and no network call.
         if self.is_ancestor(root, sha, upstream):
-            return True
+            return sha
         if not self.fetch_artifacts(root, default):
-            return False
+            return None
         if self.is_ancestor(root, sha, upstream):
-            return True
+            return sha
         base = git(root, "merge-base", upstream, sha, check=False)
         outside = self.outside_directory(root, base, sha, allowed) if base else ["(no merge base)"]
         if outside:
             self.artifact_warning(root, default, f"Local commits up to {sha[:12]} change files outside {allowed} "
                                                  f"({self.summarize(outside)}); nothing was published. "
                                                  "Ask the user to publish or reconcile these changes.")
-            return False
+            return None
         repository = github_repository(root)
         if repository is None:
             self.artifact_warning(root, default, f"origin of {root} is not a GitHub repository; pull request "
                                                  "publication is unavailable and the commits stay local.")
-            return False
+            return None
+
         failure: ProjectError | None = None
+        published = None
         try:
-            # Listed before the push, so an unusable gh leaves no branch behind on origin.
+            # Observe before pushing, including when GitHub merged but the previous process lost the response.
             listed = self.artifacts_prs(root, repository, name)
-            pushed = self.remote_git(root, "push", "--quiet", "origin", f"{sha}:refs/heads/{name}")
-            if pushed.returncode:
-                self.artifact_warning(root, default, f"Push to origin/{name} failed; artifact commits are saved "
-                                                     f"locally. Retry artifacts commit to publish them.\n"
-                                                     f"{pushed.stderr.strip()}")
-                return False
-            # That push was not forced, so the branch, and with it any open pull request from it, is now at sha;
-            # the pinned merge below refuses anything else.
-            reusable = [pr for pr in listed if pr["state"] == "OPEN" and pr["baseRefName"] == default]
-            if reusable:
-                number, url = str(reusable[0]["number"]), reusable[0].get("url", "")
-            else:
-                created = self.gh(root, "pr", "create", "--repo", repository, "--head", name, "--base", default,
-                                  "--title", title, "--body", body)
-                url = created.stdout.strip().splitlines()[-1] if created.stdout.strip() else ""
-                match = re.search(r"/pull/(\d+)$", url)
-                if created.returncode or not match:
-                    raise ProjectError(f"gh pr create failed: {(created.stderr or created.stdout).strip()}")
-                number = match.group(1)
-            print(f"baton: merging {url or name} into {default} (head pinned to {sha[:12]})", file=sys.stderr, flush=True)
-            merged = self.gh(root, "pr", "merge", number, "--repo", repository, "--merge", "--match-head-commit", sha)
-            if merged.returncode:
-                raise ProjectError(f"gh pr merge failed: {(merged.stderr or merged.stdout).strip()}")
+            published = self.published_artifacts_tip(root, default, name, sha, listed)
+            if published is None and not any(self.matching_artifacts_merge(pr, default, name, sha) for pr in listed):
+                self.check_artifacts_merge_method(root, repository)
+                pushed = self.remote_git(root, "push", "--quiet", "origin", f"{sha}:refs/heads/{name}")
+                if pushed.returncode:
+                    self.artifact_warning(root, default, f"Push to origin/{name} failed; artifact commits are saved "
+                                                         f"locally. Retry artifacts commit to publish them.\n"
+                                                         f"{pushed.stderr.strip()}")
+                    return None
+                reusable = [pr for pr in listed if pr["state"] == "OPEN" and pr["baseRefName"] == default]
+                if reusable:
+                    number, url = str(reusable[0]["number"]), reusable[0].get("url", "")
+                else:
+                    created = self.gh(root, "pr", "create", "--repo", repository, "--head", name, "--base", default,
+                                      "--title", title, "--body", body)
+                    url = created.stdout.strip().splitlines()[-1] if created.stdout.strip() else ""
+                    match = re.search(r"/pull/(\d+)$", url)
+                    if created.returncode or not match:
+                        raise ProjectError(f"gh pr create failed: {(created.stderr or created.stdout).strip()}")
+                    number = match.group(1)
+                print(f"baton: merging {url or name} into {default} (head pinned to {sha[:12]})",
+                      file=sys.stderr, flush=True)
+                merged = self.gh(root, "pr", "merge", number, "--repo", repository,
+                                 f"--{self.artifacts_merge_method}", "--match-head-commit", sha)
+                if merged.returncode:
+                    raise ProjectError(f"gh pr merge failed: {(merged.stderr or merged.stdout).strip()}")
         except ProjectError as error:
             failure = error
-        # A concurrent publisher of the same commit, or a merge whose response was lost, still published it.
-        if not (self.fetch_artifacts(root, default) and self.is_ancestor(root, sha, upstream)):
-            self.artifact_warning(root, default, (
-                # Worded for both callers: an artifact commit and a project's cleanup.
-                f"Pull request publication of {sha[:12]} from {name} failed; nothing was merged, and running the "
-                f"command again retries. {failure}" if failure else
-                f"Merged {name}, but {sha[:12]} is not yet in origin/{default}; running the command again checks."))
-            return False
+
+        if published is None and self.fetch_artifacts(root, default):
+            # A concurrent publisher or a lost merge response can leave a verifiable publication.
+            if self.is_ancestor(root, sha, upstream):
+                published = sha
+            else:
+                try:
+                    listed = self.artifacts_prs(root, repository, name)
+                    published = self.published_artifacts_tip(root, default, name, sha, listed)
+                except ProjectError as error:
+                    failure = failure or error
+        if published is None:
+            detail = f" {failure}" if failure else ""
+            self.artifact_warning(root, default, f"Pull request publication of {sha[:12]} from {name} could not be "
+                                                 f"verified in origin/{default}; rerunning checks again.{detail}")
+            return None
         print(f"Published {sha[:12]} to origin/{default} through a pull request from {name}.", flush=True)
         if not keep_branch:
             self.delete_remote_branch(root, name, sha)
-        return True
+        return published
 
     def delete_remote_branch(self, root: Path, name: str, sha: str) -> bool:
         """Best-effort removal of a merged branch from origin, only while it still points at the merged commit."""

@@ -656,6 +656,16 @@ class Gdoc:
     def clean(self, path: Path) -> bool:
         """Tracked, with neither staged nor unstaged changes."""
         relative = self.relative(path)
+        if self.branch is None and self.manager.dedicated_artifacts_branch and self.manager.artifacts_merge_method == "squash":
+            head = git(self.root, "rev-parse", "HEAD")
+            tip = self.manager.artifact_commit_tip(self.root)
+            if tip != head:
+                pending = git(self.root, "rev-parse", "--verify", f"{tip}:{relative}", check=False)
+                if not pending or not path.is_file():
+                    return False
+                staged = subprocess.run(["git", "-C", str(self.root), "--literal-pathspecs", "diff", "--cached",
+                                         "--quiet", head, "--", relative], capture_output=True)
+                return staged.returncode == 0 and pending == git(self.root, "hash-object", "--", relative)
         tracked = bool(git(self.root, "--literal-pathspecs", "ls-files", "--", relative))
         return tracked and not git(self.root, "--literal-pathspecs", "status", "--porcelain", "--", relative)
 
