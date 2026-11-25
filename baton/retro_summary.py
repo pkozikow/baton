@@ -588,7 +588,8 @@ def _run_summary(manager: Any, provider: str, timeout: int, *, now: datetime | N
                     for path, content in zip(relative, expected):
                         actual = (root / path).read_bytes()
                         if actual != content:
-                            committed_blob = git(root, "rev-parse", f"HEAD:{path}", check=False)
+                            tip = manager.artifact_commit_tip(root)
+                            committed_blob = git(root, "rev-parse", f"{tip}:{path}", check=False)
                             if not committed_blob or blob(root, committed_blob) != actual:
                                 raise ProjectError("Weekly report conflicts with retained verified output.")
                 manifest = public_manifest(prior) | {"artifacts_root": str(artifacts), "report": str(destination / "report.md")}
@@ -609,7 +610,9 @@ def _run_summary(manager: Any, provider: str, timeout: int, *, now: datetime | N
         publication = manager.commit_artifact_paths(root, f"Summarize retrospectives for {week}", relative,
                                       artifacts_root=artifacts, prepare=prepare, after_commit=after_commit)
         hashes = [digest((root / path).read_bytes()) for path in relative]
-        committed = all(digest(blob(root, git(root, "rev-parse", f"HEAD:{path}"))) == sha for path, sha in zip(relative, hashes))
+        tip = (publication or {}).get("commit", "HEAD")
+        committed = all(digest(blob(root, git(root, "rev-parse", f"{tip}:{path}"))) == sha
+                        for path, sha in zip(relative, hashes))
         remote = "origin" in git(root, "remote").splitlines()
         published = bool(remote and publication and publication["published"])
         record.update(stage="published" if published else "committed", hashes=hashes)

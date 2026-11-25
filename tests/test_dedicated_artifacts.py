@@ -127,6 +127,22 @@ class DedicatedFixture(unittest.TestCase):
     def after_merge(self, script: str) -> None:
         (self.root / "gh-after-merge.sh").write_text(script)
 
+    def configure_squash(self) -> None:
+        (self.root / "gh-merge-methods.json").write_text(json.dumps(["squash"]))
+        self.cli("config", "set", "--artifacts-merge-method", "squash")
+
+    def assert_squashed(self, head: str, *, attempts: int = 1) -> str:
+        [pr] = self.prs()
+        self.assertEqual((pr["headRefOid"], pr["baseRefName"], pr["state"]), (head, "main", "MERGED"))
+        published = pr["mergeCommit"]["oid"]
+        self.assertNotEqual(head, published)
+        self.git(self.origin, "merge-base", "--is-ancestor", head, "main", ok=False)
+        self.merged_into_origin(published)
+        self.assertEqual(len(self.gh_calls("create")), 1)
+        self.assertEqual([args[-3:] for args in self.gh_calls("merge")],
+                         [["--squash", "--match-head-commit", head]] * attempts)
+        return published
+
     def project(self, name: str = "example") -> dict:
         return next(p for p in read_state(self.projects)["projects"].values() if p["name"] == name)
 
@@ -569,6 +585,57 @@ class DedicatedCleanupTest(DedicatedFixture):
         self.assert_archived(project, worktree, record["branch"], final)
         self.assertEqual((final / "notes.md").read_text(), "Untouched original notes\n")
 
+    def test_squash_policy_mismatch_is_refused_before_sealing(self) -> None:
+        project, worktree, _name, final = self.started()
+        (self.root / "gh-merge-methods.json").write_text(json.dumps(["squash"]))
+        initial = self.git(worktree, "rev-parse", "HEAD")
+
+        failed = self.cli("cleanup", "p3", ok=False)
+
+        self.assertIn("disallows Baton's configured artifacts merge method", failed.stderr)
+        self.assertEqual(self.project(), project)
+        self.assertEqual(self.git(worktree, "rev-parse", "HEAD"), initial)
+        self.assertTrue(self.checkout("alpha").is_dir())
+        self.assertFalse(final.exists())
+        self.assertEqual(self.gh_calls("create"), [])
+        self.assertEqual(self.gh_calls("merge"), [])
+
+    def test_squash_cleanup_resumes_when_the_merge_response_is_lost(self) -> None:
+        self.configure_squash()
+        project, worktree, name, final = self.started()
+        upstream = self.push_upstream("upstream.md")
+        self.after_merge("kill -9 $BATON_PID\n")
+
+        self.cli("cleanup", "p3", ok=False)
+
+        pending = self.project()
+        self.assertEqual(pending["state"], "cleaning")
+        self.assertTrue(worktree.is_dir() and self.checkout("alpha").is_dir())
+        self.assertFalse(final.exists())
+        sealed = pending["coordination_archive"]["commit"]
+        published = self.assert_squashed(sealed)
+        self.assertEqual(self.git(self.origin, "rev-list", "--parents", "-n", "1", published),
+                         f"{published} {upstream}")
+        advanced = self.push_upstream("after-squash.md")
+
+        self.cli("cleanup", "p3")
+
+        archived = self.archived()
+        self.assertEqual((archived["uuid"], archived["state"]), (project["uuid"], "archived"))
+        self.assertEqual(archived["artifacts_path"], str(final))
+        self.assertEqual(archived["coordination_archive"]["commit"], published)
+        self.assertEqual(archived["artifacts_branch"]["publication"], {"head": sealed, "commit": published})
+        self.assertEqual(self.git(self.artifacts, "rev-parse", f"refs/baton/artifacts-published/{sealed}"), sealed)
+        self.assertEqual(self.git(self.artifacts, "rev-parse", "HEAD"), advanced)
+        self.assertEqual((final / "plan.md").read_text(), "Plan\n")
+        self.assertIn("preserve this", (final / "coordination" / "history.md").read_text())
+        self.assertFalse(worktree.exists())
+        self.assertFalse(self.checkout("alpha").exists())
+        self.git(self.artifacts, "rev-parse", "--verify", f"refs/heads/{name}", ok=False)
+        self.git(self.origin, "rev-parse", "--verify", f"refs/heads/{name}", ok=False)
+        self.assert_squashed(sealed)
+        self.level()
+
     def test_inspect_refusals_leave_the_project_active(self) -> None:
         project, worktree, name, final = self.started()
         directory = Path(project["artifacts_path"])
@@ -962,6 +1029,117 @@ class SharedCheckoutPublicationTest(DedicatedFixture):
         plan.write_text("Plan\n")
         self.cli("artifacts", "commit", "--selector", "example", "-m", "Add plan", str(plan))
         self.assert_one_merged_publication(self.git(self.artifacts, "rev-parse", "HEAD^2"))
+
+    def test_squash_shared_publication_preserves_unrelated_local_edits(self) -> None:
+        directory = self.legacy_project()
+        self.configure_squash()
+        base = self.git(self.artifacts, "rev-parse", "HEAD")
+        upstream = self.push_upstream("projects/upstream.md")
+        unrelated = self.artifacts / "unrelated.md"
+        unrelated.write_text("staged\n")
+        self.git(self.artifacts, "add", "unrelated.md")
+        unrelated.write_text("unstaged\n")
+        plan = directory / "plan.md"
+        plan.write_text("Plan\n")
+
+        self.commit(plan, "Add plan")
+
+        [pr] = self.prs()
+        published = self.assert_squashed(pr["headRefOid"])
+        self.assertEqual(self.git(self.artifacts, "rev-parse", "HEAD"), published)
+        self.git(self.artifacts, "merge-base", "--is-ancestor", base, "HEAD")
+        self.merged_into_origin(upstream)
+        self.assertEqual(self.git(self.origin, "show", f"main:{plan.relative_to(self.artifacts.resolve())}"), "Plan")
+        self.assertEqual(self.git(self.artifacts, "show", ":unrelated.md"), "staged")
+        self.assertEqual(unrelated.read_text(), "unstaged\n")
+        self.git(self.origin, "cat-file", "-e", "main:unrelated.md", ok=False)
+
+    def test_squash_shared_publication_retries_the_same_pending_commit(self) -> None:
+        directory = self.legacy_project()
+        self.configure_squash()
+        base = self.git(self.artifacts, "rev-parse", "HEAD")
+        pending_ref = "refs/baton/artifacts-pending/main"
+        blocker = self.root / "gh-fail-merge"
+        blocker.touch()
+        plan = directory / "plan.md"
+        plan.write_text("Plan\n")
+
+        self.commit(plan, "Add plan")
+
+        self.assertEqual(self.git(self.artifacts, "rev-parse", "HEAD"), base)
+        pending = self.git(self.artifacts, "rev-parse", "--verify", pending_ref)
+        self.assertEqual(self.git(self.artifacts, "show", f"{pending}:{plan.relative_to(self.artifacts.resolve())}"), "Plan")
+        [pr] = self.prs()
+        self.assertEqual((pr["state"], pr["headRefOid"]), ("OPEN", pending))
+        self.assertEqual(plan.read_text(), "Plan\n")
+        blocker.unlink()
+        self.cli("config", "set", "--branch-prefix", "new-prefix")
+        plan.write_text("Newer edit\n")
+        self.commit(plan, "Save newer edit after the first batch")
+
+        first, second = self.prs()
+        self.assertEqual((first["state"], first["headRefOid"]), ("MERGED", pending))
+        self.assertEqual(second["state"], "MERGED")
+        self.assertTrue(second["headRefName"].startswith("new-prefix/artifacts-"))
+        self.assertEqual(len(self.gh_calls("merge")), 3)
+        self.assertEqual(plan.read_text(), "Newer edit\n")
+        self.assertEqual(self.git(self.origin, "show", f"main:{plan.relative_to(self.artifacts.resolve())}"),
+                         "Newer edit")
+        self.git(self.artifacts, "rev-parse", "--verify", pending_ref, ok=False)
+        self.level()
+
+    def test_squash_stages_multiple_local_changes_before_publishing(self) -> None:
+        directory = self.legacy_project()
+        self.configure_squash()
+        base = self.git(self.artifacts, "rev-parse", "HEAD")
+        plan = directory / "plan.md"
+        for content in ("Original plan\n", "Revised plan\n"):
+            plan.write_text(content)
+            self.cli("artifacts", "commit", "--no-push", "--selector", "example", "-m", "Save plan", str(plan))
+            self.assertEqual(self.git(self.artifacts, "rev-parse", "HEAD"), base)
+        self.assertEqual(self.prs(), [])
+        pending_ref = "refs/baton/artifacts-pending/main"
+        pending = self.git(self.artifacts, "rev-parse", "--verify", pending_ref)
+        self.assertEqual(self.git(self.artifacts, "rev-list", "--count", f"{base}..{pending}"), "2")
+        self.commit(plan, "Publish saved plan")
+        self.assert_squashed(pending)
+        self.git(self.artifacts, "rev-parse", "--verify", pending_ref, ok=False)
+        self.level()
+
+    def test_squash_sync_leaves_conflicting_staged_artifact_intact(self) -> None:
+        directory = self.legacy_project()
+        self.configure_squash()
+        base = self.git(self.artifacts, "rev-parse", "HEAD")
+        plan = directory / "plan.md"
+        relative = str(plan.relative_to(self.artifacts.resolve()))
+        plan.write_text("User staged content\n")
+        self.git(self.artifacts, "add", relative)
+        plan.write_text("Artifact publication\n")
+
+        self.commit(plan, "Publish plan")
+        [pr] = self.prs()
+        self.assert_squashed(pr["headRefOid"])
+        self.assertEqual(self.git(self.artifacts, "rev-parse", "HEAD"), base)
+        self.assertEqual(self.git(self.artifacts, "show", f":{relative}"), "User staged content")
+        self.assertEqual(plan.read_text(), "Artifact publication\n")
+
+        self.git(self.artifacts, "restore", "--staged", "--", relative)
+        self.commit(plan, "Retry local sync")
+        self.assert_squashed(pr["headRefOid"])
+        self.level()
+
+    def test_squash_local_snapshot_obeys_required_commit_signing(self) -> None:
+        directory = self.legacy_project()
+        self.configure_squash()
+        self.env["GIT_CONFIG_VALUE_2"] = "true"
+        self.git(self.artifacts, "config", "gpg.program", str(self.root / "unavailable-test-signer"))
+        plan = directory / "plan.md"
+        plan.write_text("Unpublished plan\n")
+
+        failed = self.commit(plan, "Require a signature", ok=False)
+        self.assertIn("failed to sign", failed.stderr)
+        self.assertEqual(self.prs(), [])
+        self.assertEqual(plan.read_text(), "Unpublished plan\n")
 
     def test_ahead_and_behind_checkout_is_reconciled_without_a_rebase(self) -> None:
         directory = self.legacy_project()

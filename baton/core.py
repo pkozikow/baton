@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Iterator, Callable
 
 from .doctor_freshness import require_trusted_runtime
 from .configuration import (REPOSITORY_NAME_PATTERN, effective_paths, read_config, configured_branch_prefix,
-                            configured_dedicated_artifacts_branch)
+                            configured_dedicated_artifacts_branch, configured_artifacts_merge_method)
 from .errors import ProjectError, NoProject
 from .gitutil import git, common_dir, branch, write_json, file_lock, inside
 from .manifest import MEMBER_NAME_PATTERN, project_entries, entry_claims, project_claims, claim_conflict, managed_links, link_name, member_name, branch_suffix, project_code_branch
@@ -29,6 +29,7 @@ class ManagerCore:
         roots = effective_paths(config)
         self.branch_prefix = configured_branch_prefix(config)
         self.dedicated_artifacts_branch = configured_dedicated_artifacts_branch(config)
+        self.artifacts_merge_method = configured_artifacts_merge_method(config)
         self.repo_aliases: dict[str, str] = dict(config.get("repo_aliases", {}))
         self.repo = roots["projects_repo"]
         self.slots = roots["slots_root"]
@@ -550,7 +551,7 @@ class ManagerCore:
                                   sync: bool = True, artifacts_root: Path | None = None,
                                   prepare: Callable[[], None] | None = None,
                                   after_commit: Callable[[], None] | None = None,
-                                  expected_branch: str | None = None) -> dict[str, bool]: ...
+                                  expected_branch: str | None = None) -> dict[str, bool | str]: ...
         def materialize(self, project: dict[str, Any]) -> None: ...
         def reconcile_coordinator(self, project: dict[str, Any], previous_links: dict[str, Path] | None = None) -> None: ...
         def check_member_destination(self, project: dict[str, Any], repo: dict[str, Any], name: str,

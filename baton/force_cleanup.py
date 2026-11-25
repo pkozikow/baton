@@ -201,8 +201,11 @@ class ForceCleanupMixin(ManagerCore):
                      and not git(worktree, 'status', '--porcelain', '--untracked-files=all'))
         except FORCE_FAILURES:
             return False
-        return clean and subprocess.run(['git', '-C', str(source), 'merge-base', '--is-ancestor', tip, upstream],
-                                        capture_output=True).returncode == 0
+        publication = record.get("publication", {})
+        commit = publication.get("commit") if publication.get("head") == tip else tip
+        return clean and bool(commit) and subprocess.run(
+            ["git", "-C", str(source), "merge-base", "--is-ancestor", commit, upstream],
+            capture_output=True).returncode == 0
 
     def force_artifact_directory(self, project: dict[str, Any]) -> Path:
         directory = self.validate_retro_directory(project)

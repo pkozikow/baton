@@ -235,8 +235,8 @@ Cleanup seals the coordination history before removing worktrees; see
 
 For a project created with
 [`dedicated_artifacts_branch`](configuration.md#dedicated-artifacts-branch) on,
-cleanup also merges the project's artifacts branch through one pull request, with a
-merge commit, whatever the setting is by then:
+cleanup merges the project's artifacts branch through one pull request using the
+configured artifacts merge method:
 
 1. **Inspect** (also on `--dry-run` and on every resume), before anything changes.
    Cleanup refuses when `gh` is unavailable or not authenticated; the artifacts
@@ -246,17 +246,19 @@ merge commit, whatever the setting is by then:
    untracked files (except the `coordination/` evidence an interrupted seal left);
    or the shared checkout cannot take the merge: it is not on its default branch, it
    has unpublished commits outside the artifacts root, a local file collides with an
-   upstream change, or the project's final directory already exists there. Ignored
+   upstream change, the repository disallows the configured merge method, or the
+   final directory exists locally outside the tracked project history. Ignored
    files in the artifacts worktree, other than board files, are deleted with it
    after confirmation.
 2. **Seal**: the project becomes `cleaning`, and the sealed `coordination/` is
    committed and pushed to the branch. Its manifest names the final directory.
 3. **Publish**: a pull request for the sealed commit is opened (or an open one for
    that commit reused) and merged with its head pinned to that commit.
-4. **Verify**: the sealed commit is in `origin/<default>` and the local branch is
-   still at it.
-5. **Shared checkout**: its unpublished artifact commits are published, then it is
-   fast-forwarded to hold the sealed commit.
+4. **Verify**: the sealed commit or the verified result of its squash PR is
+   reachable from `origin/<default>`. The local artifacts branch is still at
+   the sealed commit.
+5. **Shared checkout**: its pending artifact commits are published, then it is
+   fast-forwarded to include the project's published commit.
 6. The code worktrees are removed as usual.
 7. **Archive**: one save switches the artifact, board, coordination archive and
    follow-up paths to the final directory and archives the project.

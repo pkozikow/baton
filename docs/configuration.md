@@ -98,22 +98,33 @@ keeps the behavior described elsewhere in these documents unchanged.
 
 Assumptions about the artifacts repository while the setting is on: `origin` is a
 GitHub repository, `gh` is installed and authenticated for it, its pull requests
-need no approval, and it allows merge commits. Baton does not wait for required
-status checks: a pending check fails the merge, and the command is rerun later.
+need no approval, and it allows the configured merge method. Baton does not wait
+for required status checks. If a check is pending, rerun the command later.
+
+The default `artifacts_merge_method` is `merge`. For a squash-only repository, set:
+
+```sh
+baton config set --dedicated-artifacts-branch --artifacts-merge-method squash
+```
+
+Both methods pin the head commit when merging. Squash publication checks the
+merged PR's exact head, target and resulting commit on the fetched default branch.
+The merge method also applies to previously created dedicated artifact branches.
 
 **New projects.** Each project created while the setting is on keeps its
 artifacts on its own branch, `<branch_prefix>/<creation-name>-<uuid8>`, in a
 worktree at `<worktrees_root>/<artifacts-checkout-name>/<creation-name>-<uuid8>`.
 Its plans, board, reviews and other artifacts live inside that worktree (status
 reports `artifacts_branch`); every artifact commit is pushed to that branch.
-`baton cleanup` opens one pull request for the branch, merges it with a merge
-commit pinned to the sealed commit, and archives the project at
+`baton cleanup` opens one pull request for the branch, merges it with its head
+pinned to the sealed commit, and archives the project at
 `<artifacts_root>/<creation-name>-<uuid8>` in the shared checkout (see
 [Projects](projects.md#notes-and-cleanup)). The mode is recorded per project at
 creation: changing the setting later never moves an existing project.
 
-**Shared-checkout commits.** Commits without a project branch are still made on
-the shared checkout's default branch: archived projects (unattended retros,
+**Shared-checkout commits.** Merge-commit mode records changes without a
+project branch on the shared checkout's default branch. These include archived
+projects (unattended retros,
 `artifacts commit`, `review save` or `gdoc` by full UUID), weekly retro summaries,
 and active projects created before the setting was turned on. With the setting on,
 Baton never pushes them to the default branch. It first checks that `gh` can list
@@ -128,6 +139,22 @@ base change files outside the artifacts root. A failure leaves the commits local
 with a warning, and the next artifact commit retries them. Two cases still need
 the user: a pull request that GitHub cannot merge, and a fast-forward blocked by
 local files.
+
+In squash mode, Baton puts shared artifact commits under
+`refs/baton/artifacts-pending/<default>` using a separate Git index. The working
+files stay in the shared checkout, and the shared default branch only
+fast-forwards. `--no-push` saves changes locally in the pending ref. Once submitted,
+the batch stays pinned until the PR and local sync complete. Retry
+`baton artifacts commit` after a failed publication. If there are staged changes
+on the same paths or incoming Git changes that cannot safely be applied, resolve
+them before retrying. Baton keeps the original tips of squashed artifacts under
+`refs/baton/artifacts-published/` for local history and recovery.
+
+Before switching an existing shared checkout to squash mode, publish and
+reconcile any commits already on its local default branch. Preserve the original
+tip and verify the squash publication before reconciling. Baton refuses squash
+cleanup while the local default branch has commits outside the fetched default
+branch.
 
 **Fast-forward rule.** With the setting on, every fast-forward of the shared
 checkout (artifact commits, `gdoc`, unattended retros, cleanup) takes any pure
