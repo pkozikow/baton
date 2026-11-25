@@ -664,7 +664,9 @@ class ArtifactsMixin(ManagerCore):
                     isolated_git("add", "-A", "--", *staged)
                 tree = isolated_git("write-tree")
                 if tree != git(root, "rev-parse", f"{tip}^{{tree}}"):
-                    tip = isolated_git("commit-tree", tree, "-p", tip, "-m", message)
+                    signing = git(root, "config", "--bool", "--get", "commit.gpgsign", check=False)
+                    flags = ["-S"] if signing == "true" else []
+                    tip = isolated_git("commit-tree", tree, "-p", tip, *flags, "-m", message)
                     git(root, "update-ref", pending_ref, tip, pending)
                     print(f"Committed {tip[:12]} for artifact publication in {root}.", flush=True)
             if after_commit is not None:
@@ -721,6 +723,8 @@ class ArtifactsMixin(ManagerCore):
 
     def sync_shared_squash(self, root: Path, default: str, sha: str, published: str) -> bool:
         head = git(root, "rev-parse", "HEAD")
+        if published == sha and not self.is_ancestor(root, head, sha):
+            published = git(root, "rev-parse", f"refs/remotes/origin/{default}")
         if branch(root) != default or not (self.is_ancestor(root, head, published) or
                                            self.is_ancestor(root, published, head)):
             self.artifact_warning(root, default, f"Artifact publication {published[:12]} landed, but the shared "

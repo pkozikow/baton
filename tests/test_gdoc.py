@@ -1129,12 +1129,19 @@ class SharedCheckoutPullRequestGdocTest(unittest.TestCase):
         self.gdoc("pull", "--no-push")
         self.assertEqual(self.git(self.artifacts, "rev-parse", "HEAD"), base)
         self.serve(document("Second."), "Second.\n")
+        blocked = self.root / "gh-fail-merge"
+        blocked.touch()
+        self.gdoc("pull")
+        self.assertEqual(self.git(self.artifacts, "rev-parse", "HEAD"), base)
+        blocked.unlink()
+        self.serve(document("Third."), "Third.\n")
         self.gdoc("pull")
 
-        pr = json.loads(self.pull_requests.read_text())[-1]
-        self.assertEqual(pr["state"], "MERGED")
+        prs = json.loads(self.pull_requests.read_text())
+        self.assertEqual([pr["state"] for pr in prs], ["MERGED", "MERGED", "MERGED"])
+        pr = prs[-1]
         self.assertEqual(self.git(self.artifacts, "rev-parse", "HEAD"), pr["mergeCommit"]["oid"])
-        self.assertTrue(path.read_text().endswith("Second.\n"))
+        self.assertTrue(path.read_text().endswith("Third.\n"))
         self.assertEqual(self.git(self.artifacts, "status", "--porcelain"), "")
 
     def test_push_from_an_unpublished_checkout_publishes_it_first(self) -> None:

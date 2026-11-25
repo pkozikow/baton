@@ -1106,6 +1106,41 @@ class SharedCheckoutPublicationTest(DedicatedFixture):
         self.git(self.artifacts, "rev-parse", "--verify", pending_ref, ok=False)
         self.level()
 
+    def test_squash_sync_leaves_conflicting_staged_artifact_intact(self) -> None:
+        directory = self.legacy_project()
+        self.configure_squash()
+        base = self.git(self.artifacts, "rev-parse", "HEAD")
+        plan = directory / "plan.md"
+        relative = str(plan.relative_to(self.artifacts.resolve()))
+        plan.write_text("User staged content\n")
+        self.git(self.artifacts, "add", relative)
+        plan.write_text("Artifact publication\n")
+
+        self.commit(plan, "Publish plan")
+        [pr] = self.prs()
+        self.assert_squashed(pr["headRefOid"])
+        self.assertEqual(self.git(self.artifacts, "rev-parse", "HEAD"), base)
+        self.assertEqual(self.git(self.artifacts, "show", f":{relative}"), "User staged content")
+        self.assertEqual(plan.read_text(), "Artifact publication\n")
+
+        self.git(self.artifacts, "restore", "--staged", "--", relative)
+        self.commit(plan, "Retry local sync")
+        self.assert_squashed(pr["headRefOid"])
+        self.level()
+
+    def test_squash_local_snapshot_obeys_required_commit_signing(self) -> None:
+        directory = self.legacy_project()
+        self.configure_squash()
+        self.env["GIT_CONFIG_VALUE_2"] = "true"
+        self.git(self.artifacts, "config", "gpg.program", str(self.root / "unavailable-test-signer"))
+        plan = directory / "plan.md"
+        plan.write_text("Unpublished plan\n")
+
+        failed = self.commit(plan, "Require a signature", ok=False)
+        self.assertIn("failed to sign", failed.stderr)
+        self.assertEqual(self.prs(), [])
+        self.assertEqual(plan.read_text(), "Unpublished plan\n")
+
     def test_ahead_and_behind_checkout_is_reconciled_without_a_rebase(self) -> None:
         directory = self.legacy_project()
         (self.root / "gh-fail-merge").touch()

@@ -661,7 +661,7 @@ class Gdoc:
             tip = self.manager.artifact_commit_tip(self.root)
             if tip != head:
                 pending = git(self.root, "rev-parse", "--verify", f"{tip}:{relative}", check=False)
-                if not pending or not path.is_file():
+                if not pending or path.is_symlink() or not path.is_file():
                     return False
                 staged = subprocess.run(["git", "-C", str(self.root), "--literal-pathspecs", "diff", "--cached",
                                          "--quiet", head, "--", relative], capture_output=True)
@@ -793,6 +793,11 @@ class Gdoc:
         default = self.manager.artifact_checkout(self.root, [], self.branch) if remote else ""
         fetched = remote and self.branch is None and self.manager.fetch_artifacts(self.root, default)
         if fetched:
+            if (self.manager.dedicated_artifacts_branch and self.manager.artifacts_merge_method == "squash"
+                    and self.manager.submitted_artifact_ref(self.root, default)):
+                self.manager.push_artifacts(self.root, default, artifacts_root=self.directory.parent)
+                if self.manager.submitted_artifact_ref(self.root, default):
+                    raise ProjectError("Finish the pending artifact publication before pulling new Doc changes.")
             with self.manager.artifacts_lock(self.root):
                 self.manager.fast_forward_artifacts(self.root, default, artifacts_root=self.directory.parent)
         if paths:
