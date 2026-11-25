@@ -389,12 +389,17 @@ class CleanupMixin(ForceCleanupMixin):
                                f"origin/{default} ({self.summarize(collisions)}); ask the user to resolve them "
                                "before cleanup.")
         if final.exists() or final.is_symlink():
+            relative = final.relative_to(shared).as_posix()
             sealed = self.sealed_artifacts_tip(project) if project["state"] == "cleaning" else None
-            # Present only after a resumed cleanup brought the merged branch into the shared checkout.
-            if final.is_symlink() or not sealed or not self.is_ancestor(shared, sealed, "HEAD"):
-                raise ProjectError(f"{final} already exists in the shared artifacts checkout; the merged artifacts "
-                                   "branch needs that directory. Ask the user to move it before cleanup.")
-            changed = local_changes(shared, str(final.relative_to(shared)))
+            published = sealed and self.is_ancestor(shared, sealed, head)
+            # A migrated branch can inherit the project directory from main.
+            tracked = (base and directory.relative_to(worktree).as_posix() == relative
+                       and git(shared, "cat-file", "-t", f"{base}:{relative}", check=False) == "tree"
+                       and git(shared, "cat-file", "-t", f"{head}:{relative}", check=False) == "tree")
+            if not final.is_dir() or final.resolve() != final or not (published or tracked):
+                raise ProjectError(f"{final} already exists in the shared artifacts checkout; verify the "
+                                   "destination before cleanup.")
+            changed = local_changes(shared, relative)
             if changed:
                 raise ProjectError(f"{final} has local changes in the shared artifacts checkout "
                                    f"({self.summarize(changed)}); ask the user to resolve them before cleanup.")

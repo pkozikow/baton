@@ -535,6 +535,40 @@ class DedicatedCleanupTest(DedicatedFixture):
         context = Path(self.project("example-followup")["follow_up_path"]).read_text()
         self.assertIn(str(final), context)
 
+    def test_cleanup_updates_an_existing_tracked_project_directory(self) -> None:
+        self.create("alpha")
+        project = self.project()
+        record = project["artifacts_branch"]
+        final, worktree = Path(record["final_path"]), Path(record["path"])
+        final.mkdir()
+        (final / "plan.md").write_text("Original plan\n")
+        (final / "notes.md").write_text("Untouched original notes\n")
+        self.git(self.artifacts, "add", str(final))
+        self.git(self.artifacts, "commit", "-qm", "Publish legacy project artifacts")
+        self.git(self.artifacts, "push", "-q", "origin", "main")
+        base = self.git(self.artifacts, "rev-parse", "HEAD")
+        self.git(worktree, "merge", "--ff-only", base)
+        self.write_plan("Plan\n")
+        self.post("preserve this")
+
+        (final / "plan.md").write_text("Local edit\n")
+        refused = self.cli("cleanup", "p3", ok=False)
+        self.assertIn("has local changes in the shared artifacts checkout", refused.stderr)
+        self.assertEqual(self.project()["state"], "active")
+        (final / "plan.md").write_text("Original plan\n")
+        checkout = self.root / "moved-final"
+        final.rename(checkout)
+        final.symlink_to(checkout, target_is_directory=True)
+        refused = self.cli("cleanup", "p3", ok=False)
+        self.assertIn("already exists in the shared artifacts checkout", refused.stderr)
+        self.assertEqual(self.gh_calls("merge"), [])
+        final.unlink()
+        checkout.rename(final)
+
+        self.cli("cleanup", "p3")
+        self.assert_archived(project, worktree, record["branch"], final)
+        self.assertEqual((final / "notes.md").read_text(), "Untouched original notes\n")
+
     def test_inspect_refusals_leave_the_project_active(self) -> None:
         project, worktree, name, final = self.started()
         directory = Path(project["artifacts_path"])
@@ -689,6 +723,23 @@ class DedicatedCleanupTest(DedicatedFixture):
         # Resuming is refused at inspect until the file is gone.
         self.assertIn("collide with changes in origin/main", self.cli("cleanup", "p3", ok=False).stderr)
         (final / "plan.md").unlink()
+        final.rmdir()
+        self.cli("cleanup", "p3")
+        self.assert_archived(project, worktree, name, final)
+        self.assertEqual(len(self.gh_calls("merge")), 1)
+
+    def test_fast_forward_preserves_an_ignored_local_file(self) -> None:
+        project, worktree, name, final = self.started()
+        (self.artifacts / ".git" / "info" / "exclude").write_text("plan.md\n")
+        local_plan = final / "plan.md"
+        self.after_merge(f"mkdir -p {shlex.quote(str(final))} && echo local > {shlex.quote(str(local_plan))}\n")
+        failed = self.cli("cleanup", "p3", ok=False)
+
+        self.assertIn("cannot take the merged artifacts branch", failed.stderr)
+        self.assertEqual(local_plan.read_text(), "local\n")
+        self.assertTrue(worktree.is_dir())
+        self.assertTrue(self.checkout("alpha").is_dir())
+        local_plan.unlink()
         final.rmdir()
         self.cli("cleanup", "p3")
         self.assert_archived(project, worktree, name, final)

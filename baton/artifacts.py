@@ -534,9 +534,10 @@ class ArtifactsMixin(ManagerCore):
                                                      "every agent (dedicated_artifacts_branch is off), so this commit "
                                                      "stays local and diverges.", reconcile=True)
                 return
-        # Git refuses a fast-forward that would overwrite another agent's uncommitted files.
-        merged = subprocess.run(["git", "-C", str(root), "merge", "--ff-only", "--quiet", upstream],
-                                text=True, capture_output=True)
+        # Protect ignored local files too, which Git would overwrite by default.
+        merged = subprocess.run(
+            ["git", "-C", str(root), "merge", "--ff-only", "--no-overwrite-ignore", "--quiet", upstream],
+            text=True, capture_output=True)
         if merged.returncode:
             self.artifact_warning(root, default, f"Cannot fast-forward to origin/{default}: "
                                                  f"{(merged.stderr or merged.stdout).strip()}; this commit stays local "
